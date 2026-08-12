@@ -1,0 +1,17 @@
+{
+  "name": "Garage — vehicle diagnostic & maintenance",
+  "short_name": "Garage",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#EEECFD",
+  "theme_color": "#6C5CE7",
+  "description": "Offline-first vehicle companion: VIN-accurate records, OBD-II scanning, maintenance intelligence and sale-ready history reports.",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='120' fill='%236C5CE7'/%3E%3Cpath d='M392 118a83 83 0 0 1-102 102l-113 113a32 32 0 1 1-45-45l113-113a83 83 0 0 1 102-102l-45 45 13 45 45 13z' fill='none' stroke='%23fff' stroke-width='26' stroke-linejoin='round'/%3E%3C/svg%3E",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

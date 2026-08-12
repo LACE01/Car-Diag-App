@@ -1,0 +1,26 @@
+services:
+  garage:
+    build: .
+    image: garage:latest
+    container_name: garage
+    restart: unless-stopped
+    ports:
+      - "2026:2026"
+    environment:
+      PORT: "2026"
+      DATA_DIR: "/data"
+      # Set to "true" only when serving over HTTPS behind a reverse proxy.
+      COOKIE_SECURE: "false"
+      TZ: "America/Chicago"
+    volumes:
+      # SQLite database + uploaded documents and photos live here.
+      - garage-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:2026/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 4s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  garage-data:

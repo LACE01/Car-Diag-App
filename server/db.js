@@ -1,0 +1,400 @@
+/* ============================================================
+   db.js — SQLite schema and migration runner
+   Two rules from the framework, enforced here:
+     1. every user-owned row carries updated_at + device_id for sync
+     2. reference data (recalls, complaints, DTC defs, NHTSA cache)
+        lives in its own tables so a provider can be wiped and
+        re-ingested without touching anyone's records
+   ============================================================ */
+import { DatabaseSync } from 'node:sqlite';
+import fs from 'node:fs';
+import path from 'node:path';
+
+const DATA_DIR = process.env.DATA_DIR || '/data';
+fs.mkdirSync(DATA_DIR, { recursive: true });
+fs.mkdirSync(path.join(DATA_DIR, 'uploads'), { recursive: true });
+
+export const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
+
+/* ------------------------------------------------------------
+   Thin wrapper over node:sqlite.
+
+   Using the runtime's own SQLite rather than a native npm module
+   means there is no compile step, no node-gyp, no prebuild
+   mismatch, and the container image is a single stage. The cost
+   is that node:sqlite only binds null, number, bigint, string and
+   Uint8Array — so booleans, undefined, Dates and plain objects are
+   normalised here rather than at every call site.
+   ------------------------------------------------------------ */
+function norm(v) {
+  if (v === undefined) return null;
+  if (typeof v === 'boolean') return v ? 1 : 0;
+  if (v instanceof Date) return v.toISOString();
+  if (v !== null && typeof v === 'object' && !(v instanceof Uint8Array)) return JSON.stringify(v);
+  return v;
+}
+const plain = r => (r ? { ...r } : r);
+
+class Stmt {
+  constructor(s) { this.s = s; }
+  run(...a) { return this.s.run(...a.map(norm)); }
+  get(...a) { return plain(this.s.get(...a.map(norm))); }
+  all(...a) { return this.s.all(...a.map(norm)).map(plain); }
+}
+class DB {
+  constructor(file) { this.raw = new DatabaseSync(file); }
+  exec(sql) { return this.raw.exec(sql); }
+  prepare(sql) { return new Stmt(this.raw.prepare(sql)); }
+  close() { return this.raw.close(); }
+}
+
+export const db = new DB(path.join(DATA_DIR, 'garage.db'));
+db.exec('PRAGMA journal_mode = WAL');
+db.exec('PRAGMA foreign_keys = ON');
+db.exec('PRAGMA busy_timeout = 5000');
+
+/* ---------- migrations ---------- */
+const MIGRATIONS = [
+  {
+    id: '001_core',
+    sql: `
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY,
+      email TEXT UNIQUE NOT NULL COLLATE NOCASE,
+      name TEXT NOT NULL,
+      pw_hash TEXT NOT NULL,
+      units TEXT NOT NULL DEFAULT 'imperial',
+      role TEXT NOT NULL DEFAULT 'owner',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS sessions (
+      token TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      expires_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS ix_sessions_user ON sessions(user_id);
+
+    -- a garage is the sharing boundary: family, or a shop
+    CREATE TABLE IF NOT EXISTS garages (
+      id INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS memberships (
+      garage_id INTEGER NOT NULL REFERENCES garages(id) ON DELETE CASCADE,
+      user_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      role TEXT NOT NULL DEFAULT 'member',      -- owner | member | viewer
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (garage_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS vehicles (
+      id INTEGER PRIMARY KEY,
+      garage_id INTEGER NOT NULL REFERENCES garages(id) ON DELETE CASCADE,
+      nickname TEXT,
+      vin TEXT, plate TEXT, plate_state TEXT,
+      year INTEGER, make TEXT, model TEXT, trim TEXT,
+      engine TEXT, hp TEXT, drive TEXT, body TEXT, fuel TEXT, trans TEXT,
+      doors TEXT, plant TEXT, gvwr TEXT,
+      is_ev INTEGER NOT NULL DEFAULT 0,
+      icon TEXT NOT NULL DEFAULT 'v_sedan',
+      hue TEXT,
+      source TEXT NOT NULL DEFAULT 'ymm',        -- vin | ymm
+      duty TEXT NOT NULL DEFAULT 'normal',       -- normal | severe
+      mileage INTEGER NOT NULL DEFAULT 0,
+      purchase_date TEXT, purchase_price REAL, purchase_odometer INTEGER,
+      seller TEXT, estimated_value REAL,
+      spec_json TEXT,                            -- raw vPIC payload
+      archived INTEGER NOT NULL DEFAULT 0,
+      device_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS ix_vehicles_garage ON vehicles(garage_id);
+
+    CREATE TABLE IF NOT EXISTS odometer_readings (
+      id INTEGER PRIMARY KEY,
+      vehicle_id INTEGER NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE,
+      value INTEGER NOT NULL,
+      source TEXT NOT NULL DEFAULT 'manual',     -- manual | obd | receipt | photo | import
+      at TEXT NOT NULL DEFAULT (datetime('now')),
+      note TEXT,
+      suspect INTEGER NOT NULL DEFAULT 0,        -- outlier / rollback flag
+      device_id TEXT
+    );
+    CREATE INDEX IF NOT EXISTS ix_odo_vehicle ON odometer_readings(vehicle_id, at);
+
+    CREATE TABLE IF NOT EXISTS service_records (
+      id INTEGER PRIMARY KEY,
+      vehicle_id INTEGER NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE,
+      what TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'maintenance',
+      date TEXT NOT NULL,
+      miles INTEGER,
+      performer TEXT NOT NULL DEFAULT 'DIY',     -- DIY | Independent shop | Dealer
+      shop_name TEXT,
+      labor_hours REAL,
+      parts_cost REAL NOT NULL DEFAULT 0,
+      labor_cost REAL NOT NULL DEFAULT 0,
+      cost REAL NOT NULL DEFAULT 0,
+      parts_json TEXT,                           -- [{name, number, brand, qty, price}]
+      notes TEXT,
+      warranty_claim INTEGER NOT NULL DEFAULT 0,
+      device_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS ix_svc_vehicle ON service_records(vehicle_id, date);
+
+    CREATE TABLE IF NOT EXISTS reminders (
+      id INTEGER PRIMARY KEY,
+      vehicle_id INTEGER NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      system TEXT,
+      interval_miles INTEGER,
+      interval_months INTEGER,
+      interval_hours INTEGER,
+      severe_factor REAL NOT NULL DEFAULT 0.5,   -- severe duty multiplies interval by this
+      last_done_miles INTEGER,
+      last_done_date TEXT,
+      est_cost REAL,
+      note TEXT,
+      active INTEGER NOT NULL DEFAULT 1,
+      source TEXT NOT NULL DEFAULT 'generic',    -- generic | oem | custom
+      device_id TEXT,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS ix_rem_vehicle ON reminders(vehicle_id);
+
+    CREATE TABLE IF NOT EXISTS fuel_logs (
+      id INTEGER PRIMARY KEY,
+      vehicle_id INTEGER NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE,
+      date TEXT NOT NULL,
+      odometer INTEGER,
+      kind TEXT NOT NULL DEFAULT 'fuel',         -- fuel | charge
+      quantity REAL NOT NULL,                    -- gallons or kWh
+      price_per_unit REAL,
+      total REAL,
+      partial INTEGER NOT NULL DEFAULT 0,
+      missed_fill INTEGER NOT NULL DEFAULT 0,
+      station TEXT,
+      charge_kind TEXT,                          -- ac | dc
+      octane TEXT,
+      note TEXT,
+      device_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS ix_fuel_vehicle ON fuel_logs(vehicle_id, odometer);
+
+    CREATE TABLE IF NOT EXISTS expenses (
+      id INTEGER PRIMARY KEY,
+      vehicle_id INTEGER NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE,
+      date TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'other',    -- insurance|registration|tax|parking|toll|wash|loan|other
+      amount REAL NOT NULL,
+      vendor TEXT,
+      note TEXT,
+      device_id TEXT
+    );
+    CREATE INDEX IF NOT EXISTS ix_exp_vehicle ON expenses(vehicle_id, date);
+
+    CREATE TABLE IF NOT EXISTS trips (
+      id INTEGER PRIMARY KEY,
+      vehicle_id INTEGER NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE,
+      date TEXT NOT NULL,
+      miles REAL NOT NULL,
+      purpose TEXT NOT NULL DEFAULT 'business',  -- business | medical | charity | personal
+      from_place TEXT, to_place TEXT, note TEXT,
+      rate REAL,                                 -- IRS cents-per-mile at time of trip
+      device_id TEXT
+    );
+    CREATE INDEX IF NOT EXISTS ix_trip_vehicle ON trips(vehicle_id, date);
+
+    CREATE TABLE IF NOT EXISTS documents (
+      id INTEGER PRIMARY KEY,
+      vehicle_id INTEGER NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL,                        -- title|registration|insurance|loan|emissions|inspection|other
+      title TEXT NOT NULL,
+      issuer TEXT, number TEXT,
+      issued_date TEXT, expires_date TEXT,
+      amount REAL,
+      note TEXT,
+      file_path TEXT, file_name TEXT, file_mime TEXT, file_size INTEGER,
+      device_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS ix_doc_vehicle ON documents(vehicle_id, expires_date);
+
+    CREATE TABLE IF NOT EXISTS warranties (
+      id INTEGER PRIMARY KEY,
+      vehicle_id INTEGER NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL,                        -- bumper|powertrain|emissions|corrosion|hybrid_hv|extended
+      label TEXT NOT NULL,
+      months INTEGER, miles INTEGER,
+      start_date TEXT, start_miles INTEGER NOT NULL DEFAULT 0,
+      provider TEXT, contract_number TEXT, deductible REAL,
+      note TEXT,
+      device_id TEXT
+    );
+    CREATE INDEX IF NOT EXISTS ix_war_vehicle ON warranties(vehicle_id);
+
+    CREATE TABLE IF NOT EXISTS tire_sets (
+      id INTEGER PRIMARY KEY,
+      vehicle_id INTEGER NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      brand TEXT, model TEXT, size TEXT,
+      season TEXT NOT NULL DEFAULT 'all-season',
+      dot_date TEXT,                             -- WWYY
+      installed_date TEXT, installed_miles INTEGER,
+      removed_date TEXT, removed_miles INTEGER,
+      new_tread_32 REAL NOT NULL DEFAULT 10,
+      rotation_pattern TEXT,
+      tpms_ids TEXT,
+      cost REAL,
+      active INTEGER NOT NULL DEFAULT 1,
+      device_id TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS tire_measurements (
+      id INTEGER PRIMARY KEY,
+      tire_set_id INTEGER NOT NULL REFERENCES tire_sets(id) ON DELETE CASCADE,
+      date TEXT NOT NULL,
+      odometer INTEGER,
+      lf REAL, rf REAL, lr REAL, rr REAL,        -- tread depth, 32nds
+      psi_lf REAL, psi_rf REAL, psi_lr REAL, psi_rr REAL,
+      rotated INTEGER NOT NULL DEFAULT 0,
+      note TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS battery_records (
+      id INTEGER PRIMARY KEY,
+      vehicle_id INTEGER NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE,
+      installed_date TEXT, group_size TEXT, cca INTEGER, brand TEXT,
+      test_date TEXT, rest_voltage REAL, cranking_voltage REAL,
+      measured_cca INTEGER, load_test TEXT,      -- pass | marginal | fail
+      note TEXT,
+      device_id TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS brake_measurements (
+      id INTEGER PRIMARY KEY,
+      vehicle_id INTEGER NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE,
+      date TEXT NOT NULL,
+      odometer INTEGER,
+      lf_pad REAL, rf_pad REAL, lr_pad REAL, rr_pad REAL,
+      lf_rotor REAL, rf_rotor REAL, lr_rotor REAL, rr_rotor REAL,
+      fluid_moisture REAL,
+      note TEXT,
+      device_id TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS diag_sessions (
+      id INTEGER PRIMARY KEY,
+      vehicle_id INTEGER NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE,
+      started_at TEXT NOT NULL DEFAULT (datetime('now')),
+      adapter TEXT,
+      protocol TEXT,
+      odometer INTEGER,
+      monitors_json TEXT,
+      notes TEXT,
+      imported_from TEXT,
+      device_id TEXT
+    );
+    CREATE INDEX IF NOT EXISTS ix_diag_vehicle ON diag_sessions(vehicle_id, started_at);
+
+    CREATE TABLE IF NOT EXISTS dtcs (
+      id INTEGER PRIMARY KEY,
+      vehicle_id INTEGER NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE,
+      session_id INTEGER REFERENCES diag_sessions(id) ON DELETE SET NULL,
+      code TEXT NOT NULL,
+      description TEXT,
+      status TEXT NOT NULL DEFAULT 'stored',     -- stored | pending | permanent | history
+      module TEXT NOT NULL DEFAULT 'powertrain',
+      first_seen TEXT NOT NULL DEFAULT (datetime('now')),
+      last_seen TEXT NOT NULL DEFAULT (datetime('now')),
+      cleared_at TEXT,
+      clear_count INTEGER NOT NULL DEFAULT 0,
+      freeze_frame_json TEXT,
+      note TEXT,
+      device_id TEXT
+    );
+    CREATE INDEX IF NOT EXISTS ix_dtc_vehicle ON dtcs(vehicle_id, code);
+
+    CREATE TABLE IF NOT EXISTS datalogs (
+      id INTEGER PRIMARY KEY,
+      session_id INTEGER NOT NULL REFERENCES diag_sessions(id) ON DELETE CASCADE,
+      pid TEXT NOT NULL,
+      name TEXT,
+      unit TEXT,
+      samples_json TEXT NOT NULL                 -- [[tMs, value], ...]
+    );
+
+    CREATE TABLE IF NOT EXISTS attachments (
+      id INTEGER PRIMARY KEY,
+      vehicle_id INTEGER NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE,
+      parent_kind TEXT, parent_id INTEGER,
+      kind TEXT NOT NULL DEFAULT 'photo',        -- photo | video | audio | doc
+      file_path TEXT NOT NULL, file_name TEXT, file_mime TEXT, file_size INTEGER,
+      caption TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS recall_status (
+      id INTEGER PRIMARY KEY,
+      vehicle_id INTEGER NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE,
+      campaign TEXT NOT NULL,
+      component TEXT, summary TEXT, consequence TEXT, remedy TEXT, reported_date TEXT,
+      completed INTEGER NOT NULL DEFAULT 0,
+      completed_at TEXT,
+      dismissed INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(vehicle_id, campaign)
+    );
+
+    -- ===== reference data: wipeable, never mixed with user rows =====
+    CREATE TABLE IF NOT EXISTS ref_cache (
+      key TEXT PRIMARY KEY,
+      payload TEXT NOT NULL,
+      fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS ref_complaints (
+      id INTEGER PRIMARY KEY,
+      vehicle_id INTEGER NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE,
+      component TEXT NOT NULL,
+      count INTEGER NOT NULL DEFAULT 0,
+      fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id INTEGER PRIMARY KEY,
+      user_id INTEGER,
+      vehicle_id INTEGER,
+      action TEXT NOT NULL,
+      detail TEXT,
+      at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    `
+  }
+];
+
+db.exec(`CREATE TABLE IF NOT EXISTS _migrations (id TEXT PRIMARY KEY, at TEXT NOT NULL DEFAULT (datetime('now')))`);
+const applied = new Set(db.prepare('SELECT id FROM _migrations').all().map(r => r.id));
+for (const m of MIGRATIONS) {
+  if (applied.has(m.id)) continue;
+  db.exec('BEGIN');
+  try {
+    db.exec(m.sql);
+    db.prepare('INSERT INTO _migrations (id) VALUES (?)').run(m.id);
+    db.exec('COMMIT');
+    console.log(`[db] migration applied: ${m.id}`);
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+}
+
+export function now() { return new Date().toISOString(); }
