@@ -378,6 +378,53 @@ const MIGRATIONS = [
       at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     `
+  },
+  {
+    id: '002_stores',
+    sql: `
+    -- where the user searches from, so they do not re-enter a ZIP every visit
+    ALTER TABLE users ADD COLUMN home_lat REAL;
+    ALTER TABLE users ADD COLUMN home_lon REAL;
+    ALTER TABLE users ADD COLUMN home_label TEXT;
+
+    -- saved parts stores. Locations come from OpenStreetMap (ODbL); this table
+    -- is the user's own shortlist, not a copy of the OSM database.
+    CREATE TABLE IF NOT EXISTS stores (
+      id INTEGER PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      brand TEXT NOT NULL,
+      name TEXT NOT NULL,
+      osm_type TEXT, osm_id TEXT,
+      lat REAL, lon REAL,
+      address TEXT, phone TEXT, website TEXT, hours TEXT,
+      note TEXT,
+      commercial_account TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(user_id, osm_type, osm_id)
+    );
+    CREATE INDEX IF NOT EXISTS ix_stores_user ON stores(user_id);
+
+    -- what you actually paid, so you know whether a quote is fair.
+    -- This is the part of "parts pricing" that needs no vendor API at all.
+    CREATE TABLE IF NOT EXISTS part_prices (
+      id INTEGER PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      vehicle_id INTEGER REFERENCES vehicles(id) ON DELETE SET NULL,
+      part_name TEXT NOT NULL,
+      part_number TEXT,
+      brand TEXT,
+      vendor TEXT,
+      store_id INTEGER REFERENCES stores(id) ON DELETE SET NULL,
+      price REAL NOT NULL,
+      quantity REAL NOT NULL DEFAULT 1,
+      core_charge REAL,
+      warranty TEXT,
+      purchased_at TEXT,
+      note TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS ix_pp_user ON part_prices(user_id, part_name);
+    `
   }
 ];
 

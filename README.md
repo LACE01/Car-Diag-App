@@ -95,6 +95,33 @@ Five fully drawn, layered, clickable figures — brakes, cooling, fuel/EVAP, fue
 and charging/starting. Toggle layers, zoom, tap a numbered callout balloon or the parts list
 to open the component inspector with specs, torque, test procedure, common failures and part links.
 
+### Parts
+
+**Store locator.** Real nearby AutoZone, O'Reilly, NAPA, Advance and Carquest — address, phone,
+opening hours and distance — from OpenStreetMap via Overpass, cached server-side for two weeks.
+Pin the ones you actually use; every part search then gives you a one-tap link into that chain's
+catalogue with your vehicle prefilled, a `tel:` link and directions. Location comes from the
+browser on `https`/`localhost`, or from a ZIP code anywhere else, and is remembered.
+
+**Your own price history.** Log what you paid, where, and the part number. The app shows
+low/average/high per part, and surfaces it the moment you search that part again. This is the
+only parts-pricing data you own outright — no vendor can deprecate it.
+
+**On live inventory, honestly:** AutoZone publishes no developer API. O'Reilly's First Call and
+NAPA's PROLink do return real local stock, but both require a Professional account and integrate
+through EDI or an aggregator such as PartsTech, whose base tier is free. If you get commercial
+accounts, that connector slots in behind this screen without changing the UI. Scraping their
+sites is not implemented and won't be — it breaks their terms and breaks constantly.
+
+### Service catalogue
+
+Logging work uses a picker of **190 services across 16 systems** — oil and engine, cooling, fuel
+and air, ignition, emissions and exhaust, transmission and driveline, brakes, suspension and
+steering, tires and wheels, electrical and charging, HVAC, body and glass, diagnostics, EV and
+hybrid, modifications, and recall/warranty admin. Picking one sets the record's category
+automatically. It's a `datalist` plus a grouped select, so you can type freely or browse — free
+text is never blocked.
+
 ### Records & reports
 - **Vehicle history packet** — the sale document. Service, odometer history with sources,
   recall status, tire and brake measurements.

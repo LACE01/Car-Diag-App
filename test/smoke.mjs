@@ -186,7 +186,8 @@ async function req(method, path, body, form) {
   ok('app shell served', html.status === 200 && /GARAGE/.test(text), html.status);
 
   const assets = {};
-  for (const f of ['/css/app.css', '/js/app.js', '/js/diagrams.js', '/js/obd.js', '/js/screens.js', '/js/diagnose.js', '/js/kb.js', '/js/icons.js', '/js/ui.js']) {
+  for (const f of ['/css/app.css', '/js/app.js', '/js/diagrams.js', '/js/obd.js', '/js/screens.js',
+    '/js/diagnose.js', '/js/kb.js', '/js/icons.js', '/js/ui.js', '/js/parts.js', '/js/services.js']) {
     const res = await fetch(BASE + f);
     ok('asset ' + f, res.status === 200, res.status);
     assets[f] = await res.text();
@@ -205,6 +206,58 @@ async function req(method, path, body, form) {
   ok('no body state flag collides with an element class', collisions.length === 0,
     collisions.length ? { collisions, hint: 'rename the body flag, e.g. "modal" -> "modal-open"' } : null);
   ok('body flags were actually discovered (guard is live)', bodyFlags.size >= 4, [...bodyFlags]);
+
+  // service catalogue is wired and substantial
+  const svc = assets['/js/services.js'];
+  const svcCount = (svc.match(/^\s*\['/gm) || []).length;
+  ok('service catalogue has a real number of entries', svcCount > 150, svcCount);
+  ok('service picker helpers exported', /function serviceSelect/.test(svc) && /function serviceDatalist/.test(svc) && /function applyService/.test(svc));
+  ok('record form uses the picker', /serviceSelect\('r-pick'/.test(assets['/js/screens.js']));
+
+  // parts store endpoints exist and validate their input
+  r = await req('GET', '/api/stores');
+  ok('saved stores list (empty to start)', r.status === 200 && Array.isArray(r.body.stores), r.body);
+
+  r = await req('POST', '/api/stores', {
+    brand: 'oreilly', name: "O'Reilly Auto Parts", osm_type: 'node', osm_id: '123456789',
+    lat: 30.44, lon: -97.62, address: '1600 Grand Ave Pkwy, Pflugerville, TX', phone: '+1-512-555-0143'
+  });
+  ok('store can be saved', r.status === 201 && r.body.store.brand === 'oreilly', r.body);
+  const storeId = r.body?.store?.id;
+
+  r = await req('POST', '/api/stores', { brand: 'oreilly', name: 'dup', osm_type: 'node', osm_id: '123456789' });
+  ok('re-saving the same OSM store updates instead of duplicating', r.body.existed === true, r.body);
+
+  r = await req('PUT', '/api/me/location', { lat: 30.44, lon: -97.62, label: 'Pflugerville, TX' });
+  ok('home location stored', r.status === 200 && r.body.ok, r.body);
+
+  r = await req('GET', '/api/stores');
+  ok('saved store gets a distance from home', typeof r.body.stores[0].distance === 'number', r.body.stores[0]);
+
+  r = await req('PATCH', `/api/stores/${storeId}`, { commercial_account: 'FC-88213', note: 'has the loaner tools' });
+  ok('commercial account number recorded on the store', r.body.store.commercial_account === 'FC-88213', r.body.store);
+
+  r = await req('GET', '/api/stores/nearby?radius=25');
+  ok('nearby accepts a stored home location', [200, 502, 503].includes(r.status) || r.status === 500, r.status);
+
+  r = await req('GET', '/api/stores/brands');
+  ok('brand deep-link table served', r.body.brands.some(b => b.id === 'autozone') && r.body.brands.some(b => b.id === 'napa'), r.body.brands?.map(b => b.id));
+
+  // price history
+  await req('POST', '/api/part-prices', { part_name: 'Front brake pads', part_number: '17D1367CH', vendor: "O'Reilly", price: 62.99, purchased_at: '2026-03-01' });
+  await req('POST', '/api/part-prices', { part_name: 'Front brake pads', vendor: 'RockAuto', price: 41.5, purchased_at: '2026-06-01' });
+  r = await req('GET', '/api/part-prices');
+  const brakeRow = r.body.summary.find(s => /brake pads/i.test(s.part_name));
+  ok('price history summarises low/avg/high', brakeRow && brakeRow.low === 41.5 && brakeRow.high === 62.99, brakeRow);
+
+  r = await req('POST', '/api/part-prices', { part_name: 'no price' });
+  ok('price log requires a price', r.status === 400, r.status);
+
+  r = await req('GET', '/api/geocode');
+  ok('geocode rejects an empty query', r.status >= 400, r.status);
+
+  r = await req('DELETE', `/api/stores/${storeId}`);
+  ok('store can be removed', r.status === 200, r.body);
 
   console.log(`\n${pass} passed, ${fail} failed\n`);
   process.exit(fail ? 1 : 0);

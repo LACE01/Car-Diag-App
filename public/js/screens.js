@@ -639,63 +639,9 @@ async function saveBattery() {
 renderers.wear = renderWear;
 
 /* ============================================================
-   SCREEN: FIND PARTS
+   SCREEN: FIND PARTS lives in parts.js — store locator,
+   deep links and your own price history.
    ============================================================ */
-function renderParts() {
-  const el = document.getElementById('s-parts');
-  const v = activeVehicle();
-  if (!v) return needVehicle(el, 'search parts that actually fit it');
-  el.innerHTML = '<div class="card" style="margin-bottom:22px"><span class="mlabel">Fitment locked to this vehicle</span>' +
-    '<div class="grid g3" style="gap:14px;margin-bottom:16px">' +
-    '<div class="field mono"><small style="font-family:Inter">' + esc(v.vin || 'No VIN on file') + '</small></div>' +
-    '<div class="field">' + esc(vLabel(v)) + '</div>' +
-    '<div class="field">' + esc(v.engine || '—') + ' <small>' + esc(String(v.drive || '').split('/')[0]) + '</small></div></div>' +
-    '<span class="mlabel">What are you looking for?</span><div class="row wrap" style="gap:10px">' +
-    '<input class="inp" id="partq" placeholder="brake pads, water pump, HO2S…" style="flex:1;min-width:200px" onkeydown="if(event.key===\'Enter\')searchParts()">' +
-    '<button class="btn" onclick="searchParts()">Search</button></div>' +
-    '<div class="row wrap" style="gap:8px;margin-top:14px">' +
-    ['front brake pads', 'water pump', 'alternator', 'oil filter', 'HO2S oxygen sensor', 'spark plugs', 'radiator', 'battery', 'serpentine belt']
-      .map(t => '<button class="chip" onclick="document.getElementById(\'partq\').value=\'' + t + '\';searchParts()">' + t + '</button>').join('') +
-    '</div></div><div id="partout"><p class="note">Pick a part above. Every link opens a real, prefilled search at that retailer.</p></div>';
-}
-function partLinks(term) {
-  const v = activeVehicle();
-  const q = encodeURIComponent((v ? vLabel(v) + ' ' : '') + term);
-  return [['RockAuto', 'https://www.rockauto.com/en/partsearch/?partname=' + encodeURIComponent(term)],
-  ['eBay Motors', 'https://www.ebay.com/sch/i.html?_nkw=' + q],
-  ['NAPA', 'https://www.napaonline.com/en/search?text=' + q],
-  ['AutoZone', 'https://www.autozone.com/searchresult?searchText=' + q],
-  ['Google Shopping', 'https://www.google.com/search?tbm=shop&q=' + q]]
-    .map(x => '<a class="rowitem" href="' + x[1] + '" target="_blank" rel="noopener" style="text-decoration:none">' +
-      '<div class="ico">' + ic('arrow', 18) + '</div><div class="txt"><b>' + x[0] + '</b><span>Opens a prefilled search</span></div></a>').join('');
-}
-function searchParts() {
-  const v = activeVehicle();
-  const term = (val('partq') || 'brake pads').trim();
-  const q = encodeURIComponent(vLabel(v) + ' ' + term);
-  const vendors = [
-    ['RockAuto', 'Catalog pricing, often cheapest online. No public API — this is a link, by design.', 'https://www.rockauto.com/en/partsearch/?partname=' + encodeURIComponent(term)],
-    ['eBay Motors', 'New, used and OEM take-offs. The Browse API has a free tier for real integration later.', 'https://www.ebay.com/sch/i.html?_nkw=' + q],
-    ['NAPA', 'Local branch stock and pickup', 'https://www.napaonline.com/en/search?text=' + q],
-    ['AutoZone', 'Same-day pickup, loaner tool programme', 'https://www.autozone.com/searchresult?searchText=' + q],
-    ["O'Reilly", 'Local stock, free code scan at the counter', 'https://www.oreillyauto.com/search?q=' + q],
-    ['Google Shopping', 'Price comparison across sellers', 'https://www.google.com/search?tbm=shop&q=' + q]
-  ];
-  document.getElementById('partout').innerHTML =
-    '<h3 class="sec-h" style="margin-top:0">Where to buy <span class="chip grey">' + esc(term) + '</span></h3>' +
-    '<div class="grid g3">' + vendors.map(x => '<a class="card" href="' + x[2] + '" target="_blank" rel="noopener" style="text-decoration:none;display:block">' +
-      '<span class="mlabel">Online</span><b style="font-weight:600;font-size:15px">' + x[0] + '</b>' +
-      '<p class="note" style="margin:6px 0 14px">' + x[1] + '</p><span class="btn xs ghost">Open search ' + ic('arrow', 12) + '</span></a>').join('') + '</div>' +
-    '<h3 class="sec-h">Nearby</h3><div class="card">' +
-    '<div class="rowitem"><div class="ico">' + ic('pin', 20) + '</div><div class="txt"><b>Parts stores near you</b><span>Counter stock, returns, and free code reads</span></div>' +
-    '<a class="btn xs ghost" target="_blank" rel="noopener" href="https://www.google.com/maps/search/auto+parts+store+near+me">Open map</a></div>' +
-    '<div class="rowitem"><div class="ico">' + ic('factory', 20) + '</div><div class="txt"><b>' + esc(v.make) + ' dealer parts counter</b><span>For OEM-only and warranty parts</span></div>' +
-    '<a class="btn xs ghost" target="_blank" rel="noopener" href="https://www.google.com/maps/search/' + encodeURIComponent(v.make + ' dealer parts') + '">Open map</a></div>' +
-    '<div class="rowitem"><div class="ico">' + ic('doc', 20) + '</div><div class="txt"><b>Look up the procedure at your library</b><span>ChiltonLibrary and EBSCO Auto Repair Source are free with a library card — wiring diagrams, torque specs and TSBs included</span></div>' +
-    '<a class="btn xs ghost" target="_blank" rel="noopener" href="https://www.google.com/search?q=' + encodeURIComponent('ChiltonLibrary OR "Auto Repair Source" library card ' + term) + '">Find it</a></div></div>' +
-    '<p class="note" style="margin-top:14px">In production this collapses into one result table. PartsTech has a free tier that returns live price and local stock across your connected suppliers in a single call with ACES/PIES fitment — the cheapest credible path to real part numbers, and a fraction of a TecDoc contract.</p>';
-}
-renderers.parts = renderParts;
 
 /* ============================================================
    SCREEN: RECORDS & REPORTS
@@ -757,7 +703,12 @@ function renderRecords() {
 function addRecord() {
   const v = activeVehicle();
   openModal(modalHead('Log a service') +
-    fld('What was done', inp('r-what', { ph: 'Oil & filter, 0W-20 full synthetic' })) +
+    fld('Pick a service', serviceSelect('r-pick', 'r-what', 'r-cat')) +
+    '<div style="height:14px"></div>' +
+    fld('What was done', '<input class="inp" id="r-what" list="r-svc-list" autocomplete="off" ' +
+      'placeholder="Start typing, or pick from the list above">' + serviceDatalist('r-svc-list') +
+      '<div class="note" id="r-what-hint" style="margin-top:6px">' + serviceCount() +
+      ' services across ' + SERVICES.length + ' systems. Free text is fine too — type anything.</div>') +
     '<div style="height:14px"></div><div class="grid g3" style="gap:14px">' +
     fld('Date', inp('r-date', { type: 'date', value: today() })) +
     fld('Odometer', inp('r-miles', { type: 'number', mono: true, value: v.mileage || '' })) +

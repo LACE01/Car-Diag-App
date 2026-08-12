@@ -12,6 +12,7 @@ import {
   garagesFor, primaryGarageId, assertVehicle, httpErr, audit
 } from './auth.js';
 import { nhtsa, normalizeVin, clusterComplaints, LIVE } from './nhtsa.js';
+import { geocode, nearbyStores, haversineMiles, BRANDS } from './stores.js';
 import * as core from './core.js';
 
 export const api = express.Router();
@@ -913,6 +914,141 @@ api.get('/vehicles/:id/safety', requireAuth, wrap(async (req, res) => {
   const v = assertVehicle(req.user.id, +req.params.id);
   const r = await nhtsa.safety(v.year, v.make, v.model);
   res.json({ ratings: r.data?.Results ?? [], source: r.source });
+}));
+
+/* ============================================================
+   PARTS STORES
+
+   Locations from OpenStreetMap via Overpass. No retailer here
+   publishes a public inventory API — AutoZone has none at all,
+   O'Reilly gates First Call behind a Professional account, NAPA
+   gates PROLink the same way. So this gives you real stores,
+   real phone numbers and real distances, and is honest about
+   not giving you shelf counts.
+   ============================================================ */
+api.get('/geocode', requireAuth, wrap(async (req, res) => {
+  res.json(await geocode(req.query.q));
+}));
+
+api.get('/stores/brands', requireAuth, (req, res) => {
+  res.json({
+    brands: Object.entries(BRANDS)
+      .filter(([id]) => id !== 'oreilly_pro')
+      .map(([id, b]) => ({ id, label: b.label, accent: b.accent, locator: b.locator }))
+  });
+});
+
+api.get('/stores/nearby', requireAuth, wrap(async (req, res) => {
+  let lat = parseFloat(req.query.lat), lon = parseFloat(req.query.lon);
+  let origin = req.query.label || null;
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    if (req.query.q) {
+      const g = await geocode(req.query.q);
+      lat = g.lat; lon = g.lon; origin = g.label;
+    } else {
+      const u = db.prepare('SELECT home_lat, home_lon, home_label FROM users WHERE id=?').get(req.user.id);
+      if (u?.home_lat == null) throw httpErr(400, 'No location. Allow location access, or search a ZIP code.');
+      lat = u.home_lat; lon = u.home_lon; origin = u.home_label;
+    }
+  }
+
+  const radius = parseFloat(req.query.radius) || 25;
+  const out = await nearbyStores({ lat, lon, radiusMiles: radius });
+
+  const saved = new Set(db.prepare('SELECT osm_type || ":" || osm_id AS k FROM stores WHERE user_id=?')
+    .all(req.user.id).map(r => r.k));
+  for (const s of out.stores) s.saved = saved.has(`${s.osm_type}:${s.osm_id}`);
+
+  res.json({ ...out, origin: { lat, lon, label: origin }, radius });
+}));
+
+/** Remember where the user searches from so they never re-enter it. */
+api.put('/me/location', requireAuth, wrap(async (req, res) => {
+  const lat = parseFloat(req.body?.lat), lon = parseFloat(req.body?.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) throw httpErr(400, 'lat and lon are required.');
+  db.prepare('UPDATE users SET home_lat=?, home_lon=?, home_label=? WHERE id=?')
+    .run(lat, lon, req.body?.label || null, req.user.id);
+  res.json({ ok: true, lat, lon, label: req.body?.label || null });
+}));
+
+api.get('/stores', requireAuth, wrap(async (req, res) => {
+  const u = db.prepare('SELECT home_lat, home_lon, home_label FROM users WHERE id=?').get(req.user.id);
+  const stores = db.prepare('SELECT * FROM stores WHERE user_id=? ORDER BY brand, name').all(req.user.id);
+  for (const s of stores) {
+    s.brand_label = BRANDS[s.brand]?.label || s.name;
+    s.distance = (u?.home_lat != null && s.lat != null)
+      ? +haversineMiles(u.home_lat, u.home_lon, s.lat, s.lon).toFixed(1) : null;
+  }
+  stores.sort((a, b) => (a.distance ?? 1e9) - (b.distance ?? 1e9));
+  res.json({ stores, home: u?.home_lat != null ? u : null });
+}));
+
+api.post('/stores', requireAuth, wrap(async (req, res) => {
+  const d = pick(req.body || {}, ['brand', 'name', 'osm_type', 'osm_id', 'lat', 'lon',
+    'address', 'phone', 'website', 'hours', 'note', 'commercial_account']);
+  if (!d.name) throw httpErr(400, 'A store needs a name.');
+  d.brand = d.brand || 'other';
+  d.user_id = req.user.id;
+  const existing = d.osm_id
+    ? db.prepare('SELECT id FROM stores WHERE user_id=? AND osm_type=? AND osm_id=?').get(req.user.id, d.osm_type, d.osm_id)
+    : null;
+  if (existing) return res.json({ store: update('stores', existing.id, d), existed: true });
+  res.status(201).json({ store: insert('stores', d) });
+}));
+
+api.patch('/stores/:sid', requireAuth, wrap(async (req, res) => {
+  const row = db.prepare('SELECT * FROM stores WHERE id=? AND user_id=?').get(+req.params.sid, req.user.id);
+  if (!row) throw httpErr(404, 'Store not found.');
+  res.json({ store: update('stores', row.id, pick(req.body || {}, ['name', 'note', 'phone', 'hours', 'commercial_account'])) });
+}));
+
+api.delete('/stores/:sid', requireAuth, wrap(async (req, res) => {
+  const row = db.prepare('SELECT * FROM stores WHERE id=? AND user_id=?').get(+req.params.sid, req.user.id);
+  if (!row) throw httpErr(404, 'Store not found.');
+  db.prepare('DELETE FROM stores WHERE id=?').run(row.id);
+  res.json({ ok: true });
+}));
+
+/* ---------- your own price history: the part of parts pricing
+     that needs no vendor API and never breaks ---------- */
+api.get('/part-prices', requireAuth, wrap(async (req, res) => {
+  const term = String(req.query.q || '').trim();
+  const rows = term
+    ? db.prepare(`SELECT * FROM part_prices WHERE user_id=? AND part_name LIKE ? ORDER BY COALESCE(purchased_at, created_at) DESC`)
+      .all(req.user.id, `%${term}%`)
+    : db.prepare('SELECT * FROM part_prices WHERE user_id=? ORDER BY COALESCE(purchased_at, created_at) DESC LIMIT 200').all(req.user.id);
+
+  const byPart = {};
+  for (const r of rows) {
+    const k = r.part_name.toLowerCase();
+    (byPart[k] ||= { part_name: r.part_name, prices: [] }).prices.push(r.price);
+  }
+  const summary = Object.values(byPart).map(g => ({
+    part_name: g.part_name,
+    times: g.prices.length,
+    low: Math.min(...g.prices),
+    high: Math.max(...g.prices),
+    avg: +(g.prices.reduce((s, x) => s + x, 0) / g.prices.length).toFixed(2)
+  })).sort((a, b) => b.times - a.times);
+
+  res.json({ prices: rows, summary });
+}));
+
+api.post('/part-prices', requireAuth, wrap(async (req, res) => {
+  const d = pick(req.body || {}, ['vehicle_id', 'part_name', 'part_number', 'brand', 'vendor',
+    'store_id', 'price', 'quantity', 'core_charge', 'warranty', 'purchased_at', 'note']);
+  if (!d.part_name || d.price == null) throw httpErr(400, 'A part name and a price are required.');
+  if (d.vehicle_id) assertVehicle(req.user.id, +d.vehicle_id);
+  d.user_id = req.user.id;
+  res.status(201).json({ price: insert('part_prices', d) });
+}));
+
+api.delete('/part-prices/:pid', requireAuth, wrap(async (req, res) => {
+  const row = db.prepare('SELECT * FROM part_prices WHERE id=? AND user_id=?').get(+req.params.pid, req.user.id);
+  if (!row) throw httpErr(404, 'Not found.');
+  db.prepare('DELETE FROM part_prices WHERE id=?').run(row.id);
+  res.json({ ok: true });
 }));
 
 /* ---------- error handler ---------- */
