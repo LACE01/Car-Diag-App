@@ -158,6 +158,7 @@ async function setActive(id) {
   state.activeId = id;
   localStorage.setItem('garage.activeId', id);
   state.detail = null;
+  VH.id = null; EPA.id = null; VCONF.loaded = false;   // per-vehicle caches
   await loadDetail();
   renderNav();
   if (renderers[state.screen]) renderers[state.screen]();
@@ -167,6 +168,7 @@ async function refreshDetail() {
   await loadDetail(true);
   await loadAll();
   if (renderers[state.screen]) renderers[state.screen]();
+  loadVehicleExtras(true);   // attention board recomputes in the background
 }
 
 /* ============================================================
@@ -394,6 +396,69 @@ renderers.garage = renderGarage;
 /* ============================================================
    SCREEN: VEHICLE HEALTH
    ============================================================ */
+/* Federal reference data loads after the page renders, so a slow or
+   missing upstream never blocks the vehicle card. */
+const VH = { id: null, attention: null, safety: null, loading: false };
+
+async function loadVehicleExtras(force) {
+  const v = activeVehicle();
+  if (!v) return;
+  if (VH.id === v.id && !force) return;
+  VH.id = v.id; VH.loading = true; VH.attention = null; VH.safety = null;
+  try {
+    VH.attention = await API.get('/vehicles/' + v.id + '/attention');
+  } catch (e) { VH.attention = { error: e.message }; }
+  try {
+    VH.safety = await API.get('/vehicles/' + v.id + '/safety');
+  } catch (e) { VH.safety = { available: false }; }
+  VH.loading = false;
+  if (state.screen === 'vehicle') renderVehicle();
+}
+
+const LEVEL_STYLE = {
+  critical: ['bad', 'CRITICAL', '#FBE1E1', '#C33A3A'],
+  high: ['bad', 'HIGH', '#FBE1E1', '#C33A3A'],
+  medium: ['warn', 'MEDIUM', '#FDF0D8', '#A9700A'],
+  info: ['grey', 'INFO', '#F0EFF7', '#8B8AA5']
+};
+
+function attentionHtml() {
+  if (VH.loading || !VH.attention) {
+    return '<div class="card"><span class="spin"></span> Checking recalls, federal investigations, manufacturer bulletins, EPA economy and weather…</div>';
+  }
+  if (VH.attention.error) {
+    return '<div class="card"><p class="note" style="margin:0">Could not build the attention board: ' + esc(VH.attention.error) + '</p></div>';
+  }
+  const { items, counts } = VH.attention;
+  if (!items.length) {
+    return '<div class="card empty"><div style="color:var(--ok);margin-bottom:8px">' + ic('check', 34) + '</div>' +
+      '<b style="color:var(--ink)">Nothing needs your attention</b>' +
+      '<p class="note" style="margin:6px 0 0">No unremedied recalls, no open federal investigation, nothing overdue, no stored codes.</p></div>';
+  }
+  const icons = { recall: 'alert', investigation: 'alert', dtc: 'mil', maintenance: 'wrench', battery: 'battery', tires: 'tire', brakes: 'brake', warranty: 'shield', document: 'doc', economy: 'chart', complaints: 'user', tsb: 'doc', weather: 'temp' };
+
+  return '<div class="row wrap" style="gap:8px;margin-bottom:14px">' +
+    ['critical', 'high', 'medium', 'info'].filter(l => counts[l]).map(l =>
+      '<span class="chip ' + LEVEL_STYLE[l][0] + '">' + counts[l] + ' ' + LEVEL_STYLE[l][1] + '</span>').join('') +
+    '</div><div class="card">' +
+    items.map(x => {
+      const st = LEVEL_STYLE[x.level] || LEVEL_STYLE.info;
+      return '<div style="padding:14px 0;border-bottom:1px solid var(--line)">' +
+        '<div class="row" style="gap:14px;align-items:flex-start">' +
+        '<div class="ico" style="background:' + st[2] + ';color:' + st[3] + '">' + ic(icons[x.kind] || 'alert', 20) + '</div>' +
+        '<div style="flex:1;min-width:0">' +
+        '<div class="between wrap" style="gap:8px"><b style="font-weight:600;font-size:15px">' + esc(x.title) + '</b>' +
+        '<span class="chip ' + st[0] + '" style="font-size:9px">' + st[1] + '</span></div>' +
+        '<div class="note" style="margin-top:3px;color:var(--ink)">' + esc(x.body || '') + '</div>' +
+        (x.why ? '<div class="note" style="margin-top:6px">' + esc(x.why) + '</div>' : '') +
+        '<div class="row wrap" style="gap:6px;margin-top:8px">' +
+        '<span class="chip grey" style="font-size:9px">SOURCE · ' + esc(x.source || 'unknown') + '</span>' +
+        (x.confidence ? '<span class="chip ' + (/^LOW/.test(x.confidence) ? 'warn' : 'grey') + '" style="font-size:9px">CONFIDENCE · ' + esc(x.confidence) + '</span>' : '') +
+        '</div></div></div></div>';
+    }).join('') +
+    '<p class="note" style="margin:14px 0 0">Sorted by what can hurt you, not by what arrived most recently. Every line carries its source and how much confidence it deserves — "31 owner complaints mention steering" is a reason to inspect, not evidence that your truck has a steering defect.</p></div>';
+}
+
 const TELLTALES = [
   ['oil', 'Oil pressure'], ['temp', 'Coolant temp'], ['battery', 'Charging'],
   ['brake', 'Brake system'], ['abs', 'ABS'], ['mil', 'MIL / check engine'],
@@ -404,7 +469,9 @@ function renderVehicle() {
   const el = document.getElementById('s-vehicle');
   const v = activeVehicle();
   if (!v) return needVehicle(el, 'see its specification, schedule and recall status');
+  if (VH.id !== v.id) loadVehicleExtras();
   const d = D();
+  const ctx = VH.attention?.context || {};
   const specs = [['Engine', v.engine], ['Horsepower', v.hp ? v.hp + ' hp' : '—'], ['Drive', v.drive], ['Body', v.body],
   ['Fuel', v.fuel], ['Transmission', v.trans], ['Doors', v.doors], ['Built in', v.plant], ['GVWR', v.gvwr], ['VIN', v.vin]];
   const openR = (d.recalls || []).filter(r => !r.completed && !r.dismissed);
@@ -428,6 +495,52 @@ function renderVehicle() {
     '<div class="row wrap" style="gap:10px"><button class="btn" style="flex:1;min-width:180px" onclick="go(\'diagnose\')">Start diagnostic scan</button>' +
     '<button class="btn ghost" onclick="refreshNhtsa()">Refresh NHTSA data</button></div></div></div>' +
 
+    /* ---- what needs attention ---- */
+    '<h3 class="sec-h">What needs attention</h3>' + attentionHtml() +
+
+    /* ---- federal investigations ---- */
+    (ctx.investigations?.available
+      ? '<h3 class="sec-h">Federal investigations <span class="src">NHTSA</span></h3><div class="card">' +
+      (ctx.investigations.open.length
+        ? ctx.investigations.open.map(i => '<div class="rowitem"><div class="ico" style="background:#FBE1E1;color:#C33A3A">' + ic('alert', 20) + '</div>' +
+          '<div class="txt"><b class="mono" style="font-size:13px">' + esc(i.number || 'Investigation') + '</b>' +
+          '<span>' + esc([i.component, i.summary].filter(Boolean).join(' — ')).slice(0, 260) + '</span>' +
+          '<span>Opened ' + esc(i.openDate || '—') + '</span></div>' +
+          '<span class="chip bad">OPEN</span></div>').join('')
+        : '<p class="note" style="margin:0">No open investigations on this vehicle line.' +
+        (ctx.investigations.closed.length ? ' ' + ctx.investigations.closed.length + ' closed on record.' : '') + '</p>') +
+      '<p class="note" style="margin:14px 0 0">' + esc(ctx.investigations.caveat) + '</p></div>'
+      : '') +
+
+    /* ---- manufacturer communications ---- */
+    (ctx.communications?.available
+      ? '<h3 class="sec-h">Manufacturer communications <span class="chip grey">' + ctx.communications.total + '</span>' +
+      '<span class="src">NHTSA</span></h3><div class="card">' +
+      (ctx.communications.byComponent.slice(0, 8).map(c =>
+        '<div class="rowitem"><div class="ico mono">' + c.count + '</div><div class="txt"><b>' + esc(c.component) + '</b>' +
+        '<span>bulletins on file' + (c.latest ? ' · latest ' + esc(String(c.latest).slice(0, 10)) : '') + '</span></div></div>').join('') || '<p class="note" style="margin:0">None on file.</p>') +
+      (ctx.communications.items.length
+        ? '<div style="margin-top:14px"><span class="mlabel">Most recent subjects</span>' +
+        ctx.communications.items.slice(0, 6).map(i => '<div class="kv"><span style="flex:1;text-align:left">' +
+          esc(String(i.subject || '').slice(0, 150)) + '</span><b class="mono" style="font-size:11px">' + esc(i.number || '') + '</b></div>').join('') + '</div>'
+        : '') +
+      '<p class="note" style="margin:14px 0 0">' + esc(ctx.communications.caveat) + '</p></div>'
+      : '') +
+
+    /* ---- safety ratings ---- */
+    (VH.safety?.available
+      ? '<h3 class="sec-h">NCAP safety ratings <span class="src">NHTSA</span></h3><div class="card">' +
+      VH.safety.variants.map(r => '<div style="padding:12px 0;border-bottom:1px solid var(--line)">' +
+        '<b style="font-weight:600">' + esc(r.description) + '</b>' +
+        '<div class="grid g5" style="gap:10px;margin-top:10px">' +
+        [['Overall', r.overall], ['Frontal', r.frontal], ['Side', r.side], ['Rollover', r.rollover],
+        ['Rollover risk', r.rolloverPossibility != null ? (r.rolloverPossibility * 100).toFixed(1) + '%' : null]]
+          .map(x => '<div><span class="mlabel mute">' + x[0] + '</span><div class="field mono">' +
+            (x[1] == null ? '—' : (typeof x[1] === 'number' ? stars(x[1]) : x[1])) + '</div></div>').join('') +
+        '</div></div>').join('') +
+      '<p class="note" style="margin:14px 0 0">' + esc(VH.safety.caveat) + '</p></div>'
+      : '') +
+
     /* tell-tales */
     '<h3 class="sec-h">Tell-tale reference <span class="src sample">ISO 2575 / SAE J2402</span></h3>' +
     '<div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:12px">' +
@@ -440,12 +553,20 @@ function renderVehicle() {
 
     /* recalls */
     (d.recalls?.length ? '<h3 class="sec-h">Recalls <span class="src">Live · NHTSA</span></h3><div class="card">' +
-      d.recalls.map(r => '<div class="rowitem"><div class="ico" style="background:' + (r.completed ? '#DEF5EA' : '#FBE1E1') + ';color:' + (r.completed ? '#188752' : '#C33A3A') + '">' +
-        ic(r.completed ? 'check' : 'alert', 20) + '</div>' +
-        '<div class="txt"><b class="mono" style="font-size:13px">' + esc(r.campaign) + '</b><span>' + esc(String(r.component || '').split(':')[0]) + '</span></div>' +
-        '<button class="btn xs ghost" onclick="showRecall(' + r.id + ')">Read</button>' +
-        '<button class="btn xs ' + (r.completed ? 'ghost' : '') + '" onclick="toggleRecall(' + r.id + ',' + (r.completed ? 0 : 1) + ')">' + (r.completed ? 'Done' : 'Mark done') + '</button></div>').join('') +
-      '<p class="note" style="margin:14px 0 0">Recall remedies are free at any franchised dealer regardless of age, mileage or where you bought the car. Verify completion against your exact VIN at nhtsa.gov/recalls — this list is by year, make and model.</p></div>' : '') +
+      d.recalls.map(r => {
+        const st = r.completion_status || (r.completed ? 'owner_marked_complete' : 'unknown');
+        const badge = st === 'verified' ? ['ok', 'VERIFIED'] : st === 'owner_marked_complete' ? ['warn', 'SELF-REPORTED'] : ['bad', 'NO REMEDY RECORDED'];
+        return '<div class="rowitem"><div class="ico" style="background:' + (st === 'verified' ? '#DEF5EA' : st === 'owner_marked_complete' ? '#FDF0D8' : '#FBE1E1') +
+          ';color:' + (st === 'verified' ? '#188752' : st === 'owner_marked_complete' ? '#A9700A' : '#C33A3A') + '">' +
+          ic(st === 'verified' ? 'check' : 'alert', 20) + '</div>' +
+          '<div class="txt"><b class="mono" style="font-size:13px">' + esc(r.campaign) + '</b>' +
+          '<span>' + esc(String(r.component || '').split(':')[0]) + '</span>' +
+          (r.verification_method ? '<span>Verified by ' + esc(r.verification_method.replace(/_/g, ' ')) + '</span>' : '') + '</div>' +
+          '<span class="chip ' + badge[0] + '" style="font-size:9px">' + badge[1] + '</span>' +
+          '<button class="btn xs ghost" onclick="showRecall(' + r.id + ')">Read</button>' +
+          '<button class="btn xs ghost" onclick="recallStatus(' + r.id + ')">Status</button></div>';
+      }).join('') +
+      '<p class="note" style="margin:14px 0 0">The free recalls API tells you a campaign <b>applies to this year, make and model</b>. It cannot tell you whether <b>your VIN</b> was remedied — only NHTSA\'s VIN lookup or dealer paperwork can. That is why "self-reported" and "verified" are different states here, and why a buyer should never treat a tick in an app as proof.</p></div>' : '') +
 
     /* spec */
     '<h3 class="sec-h">Specification <span class="src ' + (v.source === 'vin' ? '' : 'sample') + '">' + (v.source === 'vin' ? 'Live · NHTSA vPIC' : 'Manual') + '</span></h3>' +
@@ -459,6 +580,11 @@ function renderVehicle() {
         '<span>' + esc(c.component.split(' — ')[1] || 'complaints filed with NHTSA for this year, make and model') + '</span></div></div>').join('')
       : '<p class="note" style="margin:0">No complaint data returned for this vehicle yet. Hit "Refresh NHTSA data" above.</p>') +
     '<p class="note" style="margin:14px 0 0">Complaints are unverified owner reports, clustered here by component and mileage band. Volume tells you where to look, not what is wrong with your specific car.</p></div>';
+}
+
+function stars(n) {
+  if (n == null) return '—';
+  return '★'.repeat(n) + '☆'.repeat(Math.max(0, 5 - n));
 }
 
 async function toggleDuty() {
@@ -490,15 +616,43 @@ function showRecall(id) {
     '<span class="mlabel">The risk</span><p style="margin:0 0 16px;font-size:14px">' + esc(r.consequence || '—') + '</p>' +
     '<span class="mlabel">The remedy</span><p style="margin:0 0 20px;font-size:14px">' + esc(r.remedy || '—') + '</p>' +
     '<a class="btn block" href="https://www.nhtsa.gov/recalls" target="_blank" rel="noopener">Check completion by VIN at NHTSA</a>' +
-    '<button class="btn block ghost" style="margin-top:10px" onclick="toggleRecall(' + r.id + ',' + (r.completed ? 0 : 1) + ')">' +
-    (r.completed ? 'Mark as not done' : 'Mark this remedy as completed') + '</button>');
+    '<button class="btn block ghost" style="margin-top:10px" onclick="recallStatus(' + r.id + ')">Record completion status</button>');
 }
-async function toggleRecall(id, completed) {
-  await API.patch('/recalls/' + id, { completed });
-  closeModal();
-  await refreshDetail();
-  await loadAll();
-  toast(completed ? 'Recall marked complete' : 'Recall reopened');
+
+function recallStatus(id) {
+  const r = (D().recalls || []).find(x => x.id === id);
+  if (!r) return;
+  const st = r.completion_status || 'unknown';
+  openModal(modalHead('Completion status — ' + r.campaign,
+    'The recalls API says this campaign applies to your year, make and model. It cannot say whether your VIN was remedied. Record what you actually know, and how you know it.') +
+    fld('Status', sel('rc-status', [
+      ['unknown', 'Unknown — no remedy recorded'],
+      ['owner_marked_complete', 'I believe it was done (self-reported)'],
+      ['verified', 'Verified — I have proof']], st)) +
+    '<div style="height:14px"></div>' +
+    fld('If verified, how?', sel('rc-method', [
+      ['nhtsa_vin_lookup', 'NHTSA VIN lookup showed no open recall'],
+      ['dealer_paperwork', 'Dealer repair order or recall completion letter'],
+      ['service_record', 'Service record in this app'],
+      ['owner_recollection', 'Owner recollection only']], r.verification_method || 'nhtsa_vin_lookup')) +
+    '<div style="height:14px"></div>' +
+    fld('Evidence note', inp('rc-note', { value: r.evidence_note || '', ph: 'RO #48213, Champion Chevrolet, 14 Mar 2024' })) +
+    '<p class="note" style="margin:14px 0 16px">"Owner recollection" is not verification — if that is all you have, choose self-reported. The distinction is the entire point: a vehicle history report that says "verified" when it means "the seller ticked a box" is worth nothing to a buyer.</p>' +
+    '<button class="btn block" onclick="saveRecallStatus(' + id + ')">Save</button>');
+}
+
+async function saveRecallStatus(id) {
+  const status = val('rc-status');
+  try {
+    const r = await API.post('/recalls/' + id + '/status', {
+      completion_status: status,
+      verification_method: val('rc-method'),
+      evidence_note: val('rc-note')
+    });
+    closeModal();
+    await refreshDetail();
+    toast(r.note, status === 'verified' ? 'ok' : '');
+  } catch (e) { toast(e.message, 'bad'); }
 }
 renderers.vehicle = renderVehicle;
 
@@ -510,6 +664,7 @@ async function boot() {
   document.getElementById('app').classList.remove('hide');
   applyPrefs();
   await loadAll();
+  await loadTools();
   if (state.activeId) await loadDetail();
   const start = location.hash.replace('#', '');
   await go(TITLES[start] ? start : 'garage');

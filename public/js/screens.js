@@ -30,6 +30,18 @@ function renderMaintenance() {
     statCard('Duty', v.duty === 'severe' ? 'SEVERE' : 'NORMAL', v.duty === 'severe' ? 'intervals roughly halved' : 'standard intervals') +
     '</div>' +
 
+    /* ---- engine hours ---- */
+    '<div class="card" style="margin-top:18px"><div class="between wrap" style="margin-bottom:12px">' +
+    '<div><span class="mlabel" style="margin:0">Engine hours</span>' +
+    '<div class="note">' + (v.engine_hours
+      ? num(v.engine_hours, 1) + ' hours recorded' + (v.mileage ? ' · ' + (v.mileage / v.engine_hours).toFixed(1) + ' mi per hour lifetime average' : '')
+      : 'Not tracked. On a diesel, a work truck, or anything that idles for a living, hours are the honest interval — the odometer stops counting while the engine does not.') + '</div></div>' +
+    '<button class="btn sm ghost" onclick="logHours()">Log hours</button></div>' +
+    (v.engine_hours && v.mileage && (v.mileage / v.engine_hours) < 25
+      ? '<p class="note" style="margin:0">A lifetime average under 25 mi/hr means substantial idle time. One hour of idling is roughly 25–33 miles of engine wear, so a mileage-only schedule is under-servicing this engine. Add hour intervals to the items that matter — oil, fuel filters, coolant.</p>'
+      : '<p class="note" style="margin:0">Any interval can trigger on hours as well as miles and time — set an hour interval on a custom item and whichever leg arrives first drives it.</p>') +
+    '</div>' +
+
     (v.duty === 'normal' ? '<div class="card" style="margin-top:18px"><span class="mlabel">Is this really normal duty?</span>' +
       '<p class="note" style="margin:0 0 12px">Severe duty is not rare — it is most people. Short trips under 5 miles, extensive idling, stop-and-go, towing, dusty or gravel roads, mountains, or sustained temperatures above 90 °F or below freezing all count. Getting this wrong is the difference between a 5,000 and a 2,500 mile oil change.</p>' +
       '<button class="btn sm ghost" onclick="toggleDuty()">Switch to severe duty</button></div>' : '') +
@@ -46,6 +58,7 @@ function renderMaintenance() {
       '<div class="note" style="margin-top:2px">Every ' + [r.intMiles ? dist(r.intMiles, true) : null, r.intMonths ? r.intMonths + ' mo' : null].filter(Boolean).join(' or ') +
       (r.last_done_date ? ' · last done ' + dateShort(r.last_done_date) + (r.last_done_miles ? ' at ' + dist(r.last_done_miles, true) : '') : '') + '</div></div>' +
       '<div class="row" style="gap:8px"><span class="chip ' + r.cls + ' mono">' + esc(r.due) + '</span>' +
+      '<button class="btn xs ghost" onclick="showTools(\'' + esc(r.name).replace(/'/g, "\\'") + '\',\'' + esc(r.system || '') + '\')">Tools</button>' +
       '<button class="btn xs ghost" onclick="markDone(' + r.id + ')">Mark done</button></div></div>' +
       '<div class="bar"><i class="' + (r.cls === 'grey' ? '' : r.cls) + '" style="width:' + r.pct + '%"></i></div>' +
       '<p class="note" style="margin:7px 0 0">' + esc(r.note || '') + (r.driver ? ' <b>Driven by the ' + (r.driver === 'time' ? 'time' : 'mileage') + ' interval.</b>' : '') + '</p>' +
@@ -69,12 +82,35 @@ function renderMaintenance() {
     '<p class="note" style="margin:14px 0 0">Sample values. Per-VIN capacities and specifications come from a licensed repair-data provider in production.</p></div>';
 }
 
+function logHours() {
+  const v = activeVehicle();
+  openModal(modalHead('Log engine hours',
+    'From the cluster, a scan tool PID, or an aftermarket hour meter. Recorded with the odometer so the app can work out how much of the life was idle.') +
+    '<div class="grid g2" style="gap:14px">' +
+    fld('Engine hours', inp('eh-hours', { type: 'number', step: '0.1', mono: true, value: v.engine_hours || '' })) +
+    fld('Odometer', inp('eh-odo', { type: 'number', mono: true, value: v.mileage || '' })) + '</div>' +
+    '<div style="height:14px"></div>' +
+    fld('Source', sel('eh-src', [['manual', 'Read from the cluster'], ['obd', 'Scan tool PID'], ['meter', 'Aftermarket hour meter']], 'manual')) +
+    '<div style="height:20px"></div><button class="btn block" onclick="saveHours()">Save</button>');
+}
+async function saveHours() {
+  try {
+    const r = await API.post('/vehicles/' + state.activeId + '/hours', {
+      hours: numVal('eh-hours'), odometer: intVal('eh-odo'), source: val('eh-src')
+    });
+    closeModal(); await refreshDetail();
+    toast(r.note || 'Engine hours logged', r.note ? 'bad' : 'ok');
+  } catch (e) { toast(e.message, 'bad'); }
+}
+
 function addReminder() {
   openModal(modalHead('Custom interval', 'Triggers on miles or time, whichever comes first.') +
     fld('Name', inp('r-name', { ph: 'Fuel filter' })) + '<div style="height:14px"></div>' +
     '<div class="grid g2" style="gap:14px">' +
     fld('Every (miles)', inp('r-mi', { type: 'number', mono: true, ph: '30000' })) +
     fld('Every (months)', inp('r-mo', { type: 'number', mono: true, ph: '36' })) + '</div>' +
+    '<div style="height:14px"></div>' +
+    fld('Every (engine hours)', inp('r-hr', { type: 'number', mono: true, ph: '250' })) +
     '<div style="height:14px"></div><div class="grid g2" style="gap:14px">' +
     fld('Severe-duty factor', inp('r-sf', { type: 'number', step: '0.05', mono: true, value: '0.5' })) +
     fld('Estimated cost', inp('r-cost', { type: 'number', mono: true, ph: '80' })) + '</div>' +
@@ -85,6 +121,7 @@ async function saveReminder() {
   try {
     await API.post('/vehicles/' + state.activeId + '/reminders', {
       name: val('r-name'), interval_miles: intVal('r-mi'), interval_months: intVal('r-mo'),
+      interval_hours: intVal('r-hr'),
       severe_factor: numVal('r-sf') ?? 0.5, est_cost: numVal('r-cost'), note: val('r-note')
     });
     closeModal(); await refreshDetail(); toast('Interval added', 'ok');
@@ -113,10 +150,53 @@ renderers.maintenance = renderMaintenance;
 /* ============================================================
    SCREEN: FUEL & MONEY
    ============================================================ */
+const EPA = { id: null, data: null };
+async function loadEpa(force) {
+  const v = activeVehicle();
+  if (!v || (EPA.id === v.id && !force)) return;
+  EPA.id = v.id;
+  try { EPA.data = await API.get('/vehicles/' + v.id + '/epa'); }
+  catch { EPA.data = null; }
+  if (state.screen === 'money') renderMoney();
+}
+
+function epaHtml() {
+  const e = EPA.data;
+  if (!e) return '<div class="card"><span class="spin"></span> Looking up the EPA rating…</div>';
+  if (!e.epa?.available) {
+    return '<div class="card"><p class="note" style="margin:0">No EPA record matched this year, make and model' +
+      (e.epa?.error ? ' (' + esc(e.epa.error) + ')' : '') +
+      '. fueleconomy.gov covers 1984 onward for US-market vehicles; heavy-duty trucks over 8,500 lb GVWR were never rated.</p></div>';
+  }
+  const p = e.epa, c = e.compare;
+  return '<div class="card">' +
+    '<div class="between wrap" style="margin-bottom:14px"><div>' +
+    '<b style="font-weight:600;font-size:15px">' + esc(p.variant) + '</b>' +
+    '<div class="note">' + esc([p.vehicleClass, p.transmission, p.drive].filter(Boolean).join(' · ')) + '</div></div>' +
+    '<span class="src">EPA · fueleconomy.gov</span></div>' +
+    '<div class="grid g4" style="gap:14px;margin-bottom:14px">' +
+    ['City', 'Highway', 'Combined', 'Annual fuel cost'].map((lab, i) => {
+      const val = [p.city, p.highway, p.combined, p.annualFuelCost != null ? money(p.annualFuelCost, 0) : null][i];
+      return '<div><span class="mlabel mute">' + lab + '</span><div class="field mono">' +
+        (val == null ? '—' : (i === 3 ? val : val + ' <small style="font-family:Inter">' + (p.isEV ? 'MPGe' : 'mpg') + '</small>')) + '</div></div>';
+    }).join('') + '</div>' +
+    (c
+      ? '<div class="bar" style="margin-bottom:10px"><i class="' + (c.level === 'bad' ? 'bad' : c.level === 'warn' ? 'warn' : 'ok') + '" style="width:' +
+      Math.max(4, Math.min(100, (c.logged / c.epaCombined) * 100)).toFixed(0) + '%"></i></div>' +
+      '<div class="between wrap"><b style="font-weight:600">You are logging ' + c.logged + ' against an EPA ' + c.epaCombined + '</b>' +
+      '<span class="chip ' + (c.level === 'bad' ? 'bad' : c.level === 'warn' ? 'warn' : 'ok') + '">' + (c.pct > 0 ? '+' : '') + c.pct + '%</span></div>' +
+      '<p class="note" style="margin:8px 0 0">' + esc(c.verdict) + '</p>'
+      : '<p class="note" style="margin:0">Log two full fills and your real economy gets measured against this baseline.</p>') +
+    (p.co2GramsPerMile ? '<div class="kv" style="margin-top:12px"><span>Tailpipe CO₂</span><b class="mono">' + num(p.co2GramsPerMile) + ' g/mi</b></div>' : '') +
+    (p.rangeElectric ? '<div class="kv"><span>EPA range</span><b class="mono">' + num(p.rangeElectric) + ' mi</b></div>' : '') +
+    '<p class="note" style="margin:12px 0 0">' + esc(p.note) + '</p></div>';
+}
+
 function renderMoney() {
   const el = document.getElementById('s-money');
   const v = activeVehicle();
   if (!v) return needVehicle(el, 'track fuel, charging and running costs');
+  if (EPA.id !== v.id) loadEpa();
   const d = D();
   const e = d.economy || { points: [], unit: 'mpg' };
   const t = d.tco || {};
@@ -132,6 +212,8 @@ function renderMoney() {
     statCard('Lifetime spend', money(t.running, 0), 'service + fuel + other') +
     statCard('Total cost', money(t.total, 0), t.depreciationToDate != null ? 'incl. ' + money(t.depreciationToDate, 0) + ' depreciation' : 'set purchase price for TCO') +
     '</div>' +
+
+    '<h3 class="sec-h">Against the EPA rating</h3>' + epaHtml() +
 
     '<div class="between" style="margin:30px 0 14px"><h3 style="font-size:19px">' + (isEV ? 'Charging' : 'Fuel') + ' economy</h3>' +
     '<button class="btn sm" onclick="addFuel()">+ Log a ' + (isEV ? 'charge' : 'fill') + '</button></div>' +
@@ -708,7 +790,8 @@ function addRecord() {
     fld('What was done', '<input class="inp" id="r-what" list="r-svc-list" autocomplete="off" ' +
       'placeholder="Start typing, or pick from the list above">' + serviceDatalist('r-svc-list') +
       '<div class="note" id="r-what-hint" style="margin-top:6px">' + serviceCount() +
-      ' services across ' + SERVICES.length + ' systems. Free text is fine too — type anything.</div>') +
+      ' services across ' + SERVICES.length + ' systems. Free text is fine too — type anything.</div>' +
+      '<button class="btn xs ghost" style="margin-top:8px" onclick="showTools(val(\'r-what\')||\'General service\', serviceSystem(val(\'r-what\')))">What tools do I need?</button>') +
     '<div style="height:14px"></div><div class="grid g3" style="gap:14px">' +
     fld('Date', inp('r-date', { type: 'date', value: today() })) +
     fld('Odometer', inp('r-miles', { type: 'number', mono: true, value: v.mileage || '' })) +

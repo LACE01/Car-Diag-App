@@ -425,6 +425,81 @@ const MIGRATIONS = [
     );
     CREATE INDEX IF NOT EXISTS ix_pp_user ON part_prices(user_id, part_name);
     `
+  },
+  {
+    id: '003_evidence_hours_config',
+    sql: `
+    -- Recall completion, modelled honestly.
+    -- The year/make/model recall API tells you a campaign APPLIES to the
+    -- vehicle line. It cannot tell you whether THIS VIN was remedied. So
+    -- "applies" and "completed" are separate facts with separate evidence,
+    -- and the UI must never let a self-marked tick look like a dealer record.
+    ALTER TABLE recall_status ADD COLUMN completion_status TEXT NOT NULL DEFAULT 'unknown';
+      -- unknown | owner_marked_complete | verified
+    ALTER TABLE recall_status ADD COLUMN verified_at TEXT;
+    ALTER TABLE recall_status ADD COLUMN verification_method TEXT;
+      -- nhtsa_vin_lookup | dealer_paperwork | service_record | owner_recollection
+    ALTER TABLE recall_status ADD COLUMN evidence_attachment_id INTEGER;
+    ALTER TABLE recall_status ADD COLUMN evidence_note TEXT;
+
+    -- Engine hours: the interval that actually matters on a diesel,
+    -- anything that idles for a living, or equipment-style use.
+    ALTER TABLE vehicles ADD COLUMN engine_hours REAL;
+    ALTER TABLE vehicles ADD COLUMN hours_source TEXT;
+    ALTER TABLE vehicles ADD COLUMN annual_miles INTEGER;
+
+    CREATE TABLE IF NOT EXISTS hour_readings (
+      id INTEGER PRIMARY KEY,
+      vehicle_id INTEGER NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE,
+      hours REAL NOT NULL,
+      odometer INTEGER,
+      at TEXT NOT NULL DEFAULT (datetime('now')),
+      source TEXT NOT NULL DEFAULT 'manual',
+      note TEXT
+    );
+    CREATE INDEX IF NOT EXISTS ix_hours_vehicle ON hour_readings(vehicle_id, at);
+
+    -- Configuration the VIN cannot tell us, confirmed by the owner.
+    -- This is what makes a diagram match the vehicle in front of you
+    -- instead of a generic one.
+    CREATE TABLE IF NOT EXISTS vehicle_config (
+      vehicle_id INTEGER PRIMARY KEY REFERENCES vehicles(id) ON DELETE CASCADE,
+      cylinders INTEGER,
+      layout TEXT,                 -- I | V | Flat | Rotary | Electric
+      aspiration TEXT,             -- na | turbo | supercharged | twin-turbo
+      injection TEXT,              -- port | direct | both | diesel-cr | carb
+      rear_brakes TEXT,            -- disc | drum
+      front_brakes TEXT,           -- disc | drum
+      abs INTEGER,
+      drive TEXT,                  -- FWD | RWD | AWD | 4WD
+      trans_type TEXT,             -- auto | manual | cvt | dct | ev-single
+      cooling TEXT,                -- crossflow | downflow
+      fan TEXT,                    -- electric | clutch
+      fuel_delivery TEXT,          -- returnless | return | diesel
+      battery_location TEXT,       -- engine bay | trunk | under seat
+      notes TEXT,
+      confirmed_at TEXT,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- Tool ownership, so a job list can say what you already have.
+    CREATE TABLE IF NOT EXISTS tools (
+      id INTEGER PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      tool_id TEXT NOT NULL,
+      owned INTEGER NOT NULL DEFAULT 1,
+      brand TEXT,
+      model TEXT,
+      note TEXT,
+      acquired_at TEXT,
+      UNIQUE(user_id, tool_id)
+    );
+
+    ALTER TABLE users ADD COLUMN preferred_brands TEXT NOT NULL DEFAULT 'icon,milwaukee';
+
+    -- baseline for the engine-hour leg of an interval
+    ALTER TABLE reminders ADD COLUMN last_done_hours REAL;
+    `
   }
 ];
 

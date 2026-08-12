@@ -187,7 +187,8 @@ async function req(method, path, body, form) {
 
   const assets = {};
   for (const f of ['/css/app.css', '/js/app.js', '/js/diagrams.js', '/js/obd.js', '/js/screens.js',
-    '/js/diagnose.js', '/js/kb.js', '/js/icons.js', '/js/ui.js', '/js/parts.js', '/js/services.js']) {
+    '/js/diagnose.js', '/js/kb.js', '/js/icons.js', '/js/ui.js', '/js/parts.js', '/js/services.js',
+    '/js/tools.js']) {
     const res = await fetch(BASE + f);
     ok('asset ' + f, res.status === 200, res.status);
     assets[f] = await res.text();
@@ -255,6 +256,62 @@ async function req(method, path, body, form) {
 
   r = await req('GET', '/api/geocode');
   ok('geocode rejects an empty query', r.status >= 400, r.status);
+
+  /* ---- engine hours ---- */
+  r = await req('POST', `/api/vehicles/${vid}/hours`, { hours: 4210, odometer: 143700 });
+  ok('engine hours logged', r.status === 201 && r.body.engine_hours === 4210, r.body);
+  r = await req('POST', `/api/vehicles/${vid}/hours`, { hours: 4900, odometer: 152000 });
+  ok('idle ratio computed between readings', typeof r.body.avgSpeed === 'number', r.body);
+  r = await req('POST', `/api/vehicles/${vid}/hours`, { hours: -5 });
+  ok('negative hours rejected', r.status === 400, r.status);
+
+  r = await req('POST', `/api/vehicles/${vid}/reminders`, { name: 'Fuel filter (hours)', interval_hours: 250, est_cost: 60 });
+  ok('hour-based interval accepted and evaluated', r.status === 201 && r.body.reminder.legs?.some(l => l.leg === 'hours'), r.body.reminder);
+
+  /* ---- vehicle configuration ---- */
+  r = await req('GET', `/api/vehicles/${vid}/config`);
+  ok('config endpoint returns an inference', r.status === 200 && r.body.inferred != null, r.body);
+  r = await req('PUT', `/api/vehicles/${vid}/config`, { cylinders: 8, layout: 'V', rear_brakes: 'drum', front_brakes: 'disc', drive: '4WD' });
+  ok('config saved', r.body.config.cylinders === 8 && r.body.config.rear_brakes === 'drum', r.body.config);
+  r = await req('PUT', `/api/vehicles/${vid}/config`, { rear_brakes: 'disc' });
+  ok('config update is idempotent (no duplicate row)', r.body.config.rear_brakes === 'disc', r.body.config);
+
+  /* ---- recall completion, modelled honestly ---- */
+  await req('POST', `/api/vehicles/${vid}/scan`, { adapter: 'x', codes: [] });
+  const rec = { vehicle_id: vid };
+  r = await req('POST', '/api/recalls/99999/status', { completion_status: 'verified', verification_method: 'dealer_paperwork' });
+  ok('recall status on a missing recall 404s', r.status === 404, r.status);
+
+  /* ---- tools ---- */
+  r = await req('GET', '/api/tools');
+  ok('tool preferences default to ICON and Milwaukee',
+    r.body.preferredBrands.includes('icon') && r.body.preferredBrands.includes('milwaukee'), r.body.preferredBrands);
+  r = await req('POST', '/api/tools', { tool_id: 'torque_12', owned: 1, brand: 'ICON' });
+  ok('tool marked as owned', r.body.tool.tool_id === 'torque_12' && r.body.tool.owned === 1, r.body.tool);
+  r = await req('POST', '/api/tools', { tool_id: 'torque_12', owned: 0 });
+  ok('tool ownership toggles without duplicating', r.body.tool.owned === 0, r.body.tool);
+  r = await req('PUT', '/api/me/brands', { brands: ['icon', 'milwaukee', 'tekton'] });
+  ok('preferred brands editable', r.body.preferredBrands.length === 3, r.body);
+
+  /* ---- attention board ---- */
+  r = await req('GET', `/api/vehicles/${vid}/attention`);
+  ok('attention board builds even with every upstream offline', r.status === 200 && Array.isArray(r.body.items), r.status);
+  ok('attention items carry source and confidence',
+    r.body.items.every(i => 'source' in i && 'confidence' in i && 'level' in i), r.body.items?.[0]);
+  ok('attention levels are the documented four',
+    r.body.items.every(i => ['critical', 'high', 'medium', 'info'].includes(i.level)), [...new Set(r.body.items.map(i => i.level))]);
+  ok('attention board is sorted worst-first', (() => {
+    const rank = { critical: 0, high: 1, medium: 2, info: 3 };
+    return r.body.items.every((x, i, a) => i === 0 || rank[a[i - 1].level] <= rank[x.level]);
+  })(), r.body.items?.map(i => i.level));
+
+  /* ---- client bundles ---- */
+  const tools = assets['/js/tools.js'];
+  ok('tool library is substantial', (tools.match(/^\s{2}[a-z0-9_]+: TOOL\(/gm) || []).length > 60,
+    (tools.match(/^\s{2}[a-z0-9_]+: TOOL\(/gm) || []).length);
+  ok('tools honest where neither brand makes it', /Neither ICON nor Milwaukee makes this/.test(tools));
+  ok('diagrams take a configuration argument', /SVGS\.brakes = function \(C\)/.test(assets['/js/diagrams.js']));
+  ok('fuel figure follows cylinder count', /rep\(cyl,/.test(assets['/js/diagrams.js']));
 
   r = await req('DELETE', `/api/stores/${storeId}`);
   ok('store can be removed', r.status === 200, r.body);

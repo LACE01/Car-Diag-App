@@ -99,6 +99,23 @@ export function reminderStatus(rem, vehicle, today = new Date()) {
     }
   }
 
+  // Engine hours — the interval that actually governs a diesel, a work
+  // truck that idles, or anything used like equipment. 1 hour of idle is
+  // roughly 25–33 miles of engine wear, which is why hour-metered service
+  // exists at all.
+  if (rem.interval_hours && vehicle.engine_hours) {
+    const intHours = Math.round(rem.interval_hours * factor);
+    const base = rem.last_done_hours ?? 0;
+    const done = Math.max(0, vehicle.engine_hours - base);
+    legs.push({
+      leg: 'hours',
+      pct: Math.min(200, Math.round(done / intHours * 100)),
+      remaining: intHours - done,
+      label: intHours - done >= 0 ? `${Math.round(intHours - done)} hr` : `${Math.round(Math.abs(intHours - done))} hr over`,
+      interval: `${intHours} hr`
+    });
+  }
+
   if (!legs.length) {
     return { ...rem, pct: 0, due: 'Needs a baseline', cls: 'grey', driver: null, severe, intMiles, intMonths };
   }
@@ -444,6 +461,255 @@ export function interpretFuelTrim({ stftIdle, ltftIdle, stftCruise, ltftCruise }
 
   if (Math.abs(idle - cruise) > 15) out.findings.push({ verdict: 'Load-dependent fault', why: 'Large split between idle and cruise trims. The fault changes with airflow — that is the useful clue.' });
   return out;
+}
+
+/* ============================================================
+   ATTENTION MODEL
+
+   The point of this app is not to list everything it knows. It is to
+   sort what it knows by whether it can hurt you, and to keep the
+   source and the confidence attached to every line so the user can
+   tell the difference between "NHTSA opened an investigation into
+   this exact component" and "31 strangers mentioned steering".
+
+     critical  unremedied safety recall, open federal investigation,
+               or a fault on a brake / steering / airbag / fire path
+     high      pending or permanent DTC, overdue on time AND mileage,
+               failed battery test, tires at the legal limit
+     medium    repeated complaint cluster, TSB matching a live symptom,
+               economy trend falling hard, warranty about to lapse
+     info      routine upcoming maintenance, broad complaint patterns,
+               safety-rating context
+
+   Confidence is deliberately separate from severity. A high-severity
+   item with low confidence is still worth showing — it just must not
+   be phrased as fact.
+   ============================================================ */
+export const SAFETY_CRITICAL = /brake|steering|air ?bag|srs|restraint|fuel|fire|throttle|accelerat|tire|wheel|suspension|seat belt|structure/i;
+
+const RANK = { critical: 0, high: 1, medium: 2, info: 3 };
+
+export function scoreAttention({ vehicle, recalls = [], investigations = [], reminders = [], dtcs = [],
+  battery, brakes, tires = [], warranties = [], documents = [], complaints = [],
+  communications = [], economy, epaCompare, weather = [] }) {
+  const items = [];
+  const add = (o) => items.push({ vehicle_id: vehicle.id, ...o });
+
+  /* ---- critical ---- */
+  for (const r of recalls) {
+    if (r.completion_status === 'verified' || r.dismissed) continue;
+    const owner = r.completion_status === 'owner_marked_complete';
+    add({
+      level: 'critical', kind: 'recall',
+      title: `Safety recall ${r.campaign}`,
+      body: String(r.component || '').split(':')[0] +
+        (owner ? ' — you marked this done, but it has not been verified against your VIN.' : ' — no remedy recorded.'),
+      why: 'A recall is the manufacturer conceding a safety defect. The remedy is free at any franchised dealer regardless of age, mileage or where the vehicle was bought.',
+      source: 'NHTSA recalls API',
+      confidence: 'campaign applies to this year/make/model — VIN-level completion is unverified',
+      action: 'Verify by VIN at nhtsa.gov/recalls',
+      ref: { type: 'recall', id: r.id }
+    });
+  }
+
+  for (const inv of investigations) {
+    add({
+      level: 'critical', kind: 'investigation',
+      title: `Active federal investigation ${inv.number || ''}`.trim(),
+      body: [inv.component, inv.summary].filter(Boolean).join(' — ').slice(0, 300),
+      why: 'NHTSA opened this because a pattern showed up across the vehicle line. It is not a finding of a defect and not a recall, but it is usually the earliest public warning that something systemic exists.',
+      source: 'NHTSA investigations',
+      confidence: 'vehicle line, not your specific VIN',
+      action: null,
+      ref: { type: 'investigation', id: inv.number }
+    });
+  }
+
+  /* ---- high ---- */
+  for (const t of dtcs) {
+    if (t.cleared_at) continue;
+    const safety = SAFETY_CRITICAL.test(t.description || '') || /^[BC]/.test(t.code);
+    add({
+      level: safety ? 'critical' : 'high', kind: 'dtc',
+      title: `${t.code} — ${t.status}`,
+      body: (t.description || '') + (t.clear_count >= 2
+        ? ` You have cleared this ${t.clear_count} times and it keeps returning.` : ''),
+      why: t.status === 'permanent'
+        ? 'A permanent code cannot be cleared with a scan tool. It only goes away when its monitor runs and passes — which is exactly why it exists.'
+        : 'A stored code means the ECM recorded a fault it could confirm. The freeze frame attached to it is the most useful diagnostic evidence you have.',
+      source: 'OBD-II scan, SAE J2012',
+      confidence: 'read directly from the vehicle — this is the highest-confidence data in the app',
+      action: 'Open Diagnose',
+      ref: { type: 'dtc', id: t.id }
+    });
+  }
+
+  for (const r of reminders) {
+    if (!r.overdue) continue;
+    const bothLegs = (r.legs || []).filter(l => l.pct >= 100).length >= 2;
+    const critical = /timing belt/i.test(r.name) || /brake/i.test(r.name);
+    add({
+      level: critical || bothLegs ? 'high' : 'medium', kind: 'maintenance',
+      title: `${r.name} overdue`,
+      body: `${r.due} past the ${r.driver === 'time' ? 'time' : r.driver === 'hours' ? 'engine-hour' : 'mileage'} interval` +
+        (r.severe ? ', on the severe-duty schedule' : '') +
+        (bothLegs ? '. Both the time and mileage legs have passed.' : '.'),
+      why: /timing belt/i.test(r.name)
+        ? 'On an interference engine a snapped belt drives pistons into open valves. The repair bill is an engine, not a belt.'
+        : 'Intervals exist because the failure mode past them is expensive, not because the manufacturer wanted the shop visit.',
+      source: r.source === 'generic' ? 'generic interval, adjusted for your duty cycle' : 'your own interval',
+      confidence: r.source === 'generic'
+        ? 'generic schedule — the OEM figure for your VIN may differ' : 'set by you',
+      action: 'Mark done',
+      ref: { type: 'reminder', id: r.id }
+    });
+  }
+
+  if (battery && battery.cls === 'bad') {
+    add({
+      level: 'high', kind: 'battery',
+      title: 'Battery failed its last test',
+      body: [battery.soc != null ? `${battery.soc}% state of charge` : null,
+      battery.ccaPct != null ? `${battery.ccaPct}% of rated CCA` : null,
+      battery.age != null ? `${battery.age} years old` : null].filter(Boolean).join(' · '),
+      why: 'A weak battery does not just fail to start the car. Low system voltage makes modules behave erratically and produces trouble codes that lead people to replace expensive parts that were never faulty.',
+      source: 'your logged test',
+      confidence: 'measured',
+      action: 'Log a new test',
+      ref: { type: 'battery' }
+    });
+  }
+
+  for (const t of tires) {
+    if (!t.active) continue;
+    if (t.worst != null && t.worst <= 2) {
+      add({
+        level: 'critical', kind: 'tires',
+        title: `Tires at ${t.worst}/32 — at or below the legal minimum`,
+        body: t.verdict,
+        why: 'At 2/32 the tread can no longer clear water. Wet braking distance and hydroplaning resistance are both far past the point of being recoverable by careful driving.',
+        source: 'your measurement', confidence: 'measured', action: null, ref: { type: 'tires', id: t.id }
+      });
+    } else if (t.worst != null && t.worst <= 4) {
+      add({
+        level: 'high', kind: 'tires', title: `Tires down to ${t.worst}/32`, body: t.verdict,
+        why: 'Wet stopping distance degrades sharply below 4/32, well before the legal limit.',
+        source: 'your measurement', confidence: 'measured', action: null, ref: { type: 'tires', id: t.id }
+      });
+    }
+    if (t.age?.aged) {
+      add({
+        level: 'medium', kind: 'tires', title: `Tires are ${t.age.years} years old`,
+        body: t.age.note, why: 'Rubber oxidises and hardens regardless of tread depth. Sidewall failure on an old tire at highway speed is a different kind of event from a slow puncture.',
+        source: 'DOT date code', confidence: 'from the sidewall', action: null, ref: { type: 'tires', id: t.id }
+      });
+    }
+  }
+
+  if (brakes && brakes.cls === 'bad') {
+    add({
+      level: 'critical', kind: 'brakes', title: 'Brake pads at or below minimum',
+      body: brakes.verdict,
+      why: 'Below 3 mm there is very little friction material left before the backing plate reaches the rotor, and the rotor is the expensive part.',
+      source: 'your measurement', confidence: 'measured', action: null, ref: { type: 'brakes' }
+    });
+  }
+
+  /* ---- medium ---- */
+  for (const w of warranties) {
+    if (w.near) add({
+      level: 'medium', kind: 'warranty', title: `${w.label} expires soon`, body: w.summary,
+      why: 'Anything you have been putting off is cheaper now than the week after this lapses.',
+      source: 'your recorded terms', confidence: 'as entered — check your actual in-service date',
+      action: 'Review coverage', ref: { type: 'warranty', id: w.id }
+    });
+  }
+
+  for (const doc of documents) {
+    if (!doc.expires_date) continue;
+    const days = Math.round((new Date(doc.expires_date) - Date.now()) / 86400000);
+    if (days < 0) add({
+      level: 'high', kind: 'document', title: `${doc.title} expired`,
+      body: `Expired ${doc.expires_date}`, why: 'Driving on expired registration or insurance turns a routine stop into an expensive one.',
+      source: 'your records', confidence: 'as entered', action: null, ref: { type: 'document', id: doc.id }
+    });
+    else if (days < 45) add({
+      level: 'medium', kind: 'document', title: `${doc.title} expires in ${days} days`,
+      body: `Due ${doc.expires_date}`, why: null,
+      source: 'your records', confidence: 'as entered', action: null, ref: { type: 'document', id: doc.id }
+    });
+  }
+
+  if (epaCompare && epaCompare.level === 'bad') {
+    add({
+      level: 'medium', kind: 'economy',
+      title: `Economy ${Math.abs(epaCompare.pct)}% below the EPA figure`,
+      body: `Logging ${epaCompare.logged} against an EPA combined of ${epaCompare.epaCombined}. ${epaCompare.verdict}`,
+      why: 'A widening gap against a fixed baseline is one of the few whole-vehicle health signals available without a scan tool.',
+      source: 'EPA fueleconomy.gov vs your fuel log',
+      confidence: 'EPA is a lab cycle; your driving is not — treat the trend as the signal, not the absolute number',
+      action: 'Open Fuel & money', ref: { type: 'economy' }
+    });
+  } else if (economy?.trend?.direction === 'down' && Math.abs(economy.trend.pct) > 8) {
+    add({
+      level: 'medium', kind: 'economy', title: `Fuel economy trending down ${Math.abs(economy.trend.pct)}%`,
+      body: `${economy.trend.delta} ${economy.unit} across the second half of your log.`,
+      why: 'A steady decline with no change in how you drive points at tire pressure, a dragging brake, a thermostat stuck open, or fuel trims drifting.',
+      source: 'your fuel log', confidence: 'computed tank-to-tank from full fills',
+      action: 'Open Fuel & money', ref: { type: 'economy' }
+    });
+  }
+
+  const topComplaint = complaints[0];
+  if (topComplaint && topComplaint.count >= 25) {
+    add({
+      level: 'medium', kind: 'complaints',
+      title: `${topComplaint.count} owner complaints about ${String(topComplaint.component).split(' — ')[0]}`,
+      body: String(topComplaint.component).split(' — ')[1] || 'Filed with NHTSA for this year, make and model.',
+      why: 'Complaints are unverified owner reports and one of the inputs NHTSA uses to spot possible safety issues. Volume tells you where to look — it is not evidence that your vehicle has the fault.',
+      source: 'NHTSA complaints, clustered by component and mileage band',
+      confidence: 'LOW — unverified reports about the vehicle line, not a finding about your VIN',
+      action: null, ref: { type: 'complaints' }
+    });
+  }
+
+  for (const c of (communications?.byComponent || []).slice(0, 2)) {
+    if (c.count < 3) continue;
+    add({
+      level: 'medium', kind: 'tsb',
+      title: `${c.count} manufacturer bulletins on ${c.component}`,
+      body: 'Filed with NHTSA for this vehicle line.',
+      why: 'A cluster of bulletins on one component usually means the manufacturer knows about a recurring condition and has published a diagnostic or a revised part. Worth quoting the bulletin number to a shop.',
+      source: 'NHTSA manufacturer communications',
+      confidence: 'subject lines only — the full document is the manufacturer\'s copyrighted material, and a TSB does not mean the repair is free',
+      action: null, ref: { type: 'tsb', component: c.component }
+    });
+  }
+
+  for (const w of weather) {
+    add({
+      level: w.level === 'bad' ? 'high' : 'medium', kind: 'weather',
+      title: w.title, body: w.body,
+      why: null, source: 'National Weather Service', confidence: 'forecast', action: w.action, ref: { type: 'weather' }
+    });
+  }
+
+  /* ---- info ---- */
+  for (const r of reminders) {
+    if (r.overdue || r.cls !== 'warn') continue;
+    add({
+      level: 'info', kind: 'maintenance', title: `${r.name} due soon`, body: `${r.due} remaining`,
+      why: null, source: 'your schedule', confidence: r.source === 'generic' ? 'generic interval' : 'set by you',
+      action: 'Mark done', ref: { type: 'reminder', id: r.id }
+    });
+  }
+
+  items.sort((a, b) => (RANK[a.level] ?? 4) - (RANK[b.level] ?? 4));
+  return {
+    items,
+    counts: items.reduce((a, i) => { a[i.level] = (a[i.level] || 0) + 1; return a; }, {}),
+    worst: items[0]?.level || null
+  };
 }
 
 /* ---------- readiness monitors / drive cycle ---------- */

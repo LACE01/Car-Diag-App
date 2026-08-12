@@ -68,7 +68,8 @@ const DIAGRAMS = {
   brakes: {
     title: 'Fig. 1 — Braking system, hydraulic layout',
     layers: [['comp', 'Components', '#6C5CE7'], ['fluid', 'Hydraulic lines', '#D89B00'], ['elec', 'WSS circuits', '#8B8AA5'], ['spec', 'Spec callout', null]],
-    key: [[1, 'master_cylinder'], [2, 'booster'], [3, 'prop_valve'], [4, 'abs_module'], [5, 'caliper'], [6, 'drum']],
+    key: C => [[1, 'master_cylinder'], [2, 'booster'], [3, 'prop_valve'], [4, 'abs_module'], [5, 'caliper'],
+    [6, C.rear_brakes === 'drum' ? 'drum' : 'caliper']],
     chips: ['Torque specs', 'Test points', 'Bleed sequence', 'Pad & rotor limits', 'Line routing'],
     foot: 'Illustration follows factory service manual convention: numbered callout balloons keyed to the parts list below. Tap a balloon or a list entry.'
   },
@@ -106,12 +107,80 @@ const DIAGRAMS = {
 const LAYER_STATE = {};
 let SYS_STATE = { system: 'brakes', comp: null, tab: 0, zoom: 1 };
 
+/* ============================================================
+   CONFIGURATION
+
+   A diagram is only useful if it matches the vehicle in front of
+   you. The VIN gets us most of the way — displacement, cylinder
+   count, drivetrain — but vPIC does not report rear disc vs drum,
+   aspiration, or injection type, and those change the figure.
+
+   So: infer everything we can from the decode, let the owner
+   confirm the rest once, and then draw to that configuration.
+   The figures below are representative of YOUR configuration.
+   They are still not a VIN-exact factory illustration — that is
+   licensed data, and the app says so rather than implying more
+   precision than it has.
+   ============================================================ */
+let VCONF = { loaded: false, confirmed: null, inferred: null };
+
+async function loadVehicleConfig(force) {
+  const v = activeVehicle();
+  if (!v) { VCONF = { loaded: true, confirmed: null, inferred: null }; return; }
+  if (VCONF.loaded && VCONF.vehicleId === v.id && !force) return;
+  try {
+    const r = await API.get('/vehicles/' + v.id + '/config');
+    VCONF = { loaded: true, vehicleId: v.id, confirmed: r.config, inferred: r.inferred };
+  } catch { VCONF = { loaded: true, vehicleId: v.id, confirmed: null, inferred: null }; }
+}
+
+/** Merged view: owner-confirmed wins, VIN inference fills gaps, then sane defaults. */
+function vconf() {
+  const v = activeVehicle();
+  const c = VCONF.confirmed || {}, i = VCONF.inferred || {};
+  const pick = (k, d) => (c[k] != null && c[k] !== '' ? c[k] : (i[k] != null && i[k] !== '' ? i[k] : d));
+  const isEV = !!v?.is_ev;
+  const cyl = Number(pick('cylinders', isEV ? 0 : 4)) || (isEV ? 0 : 4);
+  return {
+    isEV,
+    cylinders: Math.max(0, Math.min(12, cyl)),
+    layout: pick('layout', isEV ? 'Electric' : (cyl >= 6 ? 'V' : 'I')),
+    aspiration: pick('aspiration', 'na'),
+    injection: pick('injection', 'port'),
+    rear_brakes: pick('rear_brakes', 'disc'),
+    front_brakes: pick('front_brakes', 'disc'),
+    drive: pick('drive', 'RWD'),
+    trans_type: pick('trans_type', isEV ? 'ev-single' : 'auto'),
+    fan: pick('fan', 'electric'),
+    fuel_delivery: pick('fuel_delivery', 'returnless'),
+    confirmed: !!VCONF.confirmed?.confirmed_at,
+    confirmedFields: Object.keys(c).filter(k => c[k] != null && c[k] !== '' && !['vehicle_id', 'updated_at', 'confirmed_at'].includes(k))
+  };
+}
+
 function renderSystems() {
   const v = activeVehicle();
+  if (!VCONF.loaded || VCONF.vehicleId !== v?.id) {
+    loadVehicleConfig().then(() => { if (state.screen === 'systems') renderSystems(); });
+  }
+  const C = vconf();
   const sv = document.getElementById('sysvehicle');
   sv.innerHTML = v
-    ? 'Diagrams for <b style="color:var(--ink)">' + esc(vLabel(v)) + '</b> · ' + esc(v.engine || '') + ' — pick a system'
-    : 'Showing generic reference diagrams. Add a vehicle to filter to its exact configuration.';
+    ? '<div class="between wrap" style="gap:10px">' +
+    '<div>Diagrams drawn for <b style="color:var(--ink)">' + esc(vLabel(v)) + '</b> — ' +
+    esc([
+      C.isEV ? 'electric drive' : (C.cylinders ? C.layout + C.cylinders : null),
+      C.aspiration !== 'na' ? C.aspiration : null,
+      C.drive,
+      C.front_brakes === 'disc' && C.rear_brakes === 'drum' ? 'front disc / rear drum' : C.rear_brakes === 'disc' ? 'four-wheel disc' : null
+    ].filter(Boolean).join(' · ')) +
+    '<div class="note" style="margin-top:3px">' +
+    (C.confirmed
+      ? 'Configuration confirmed by you. ' + C.confirmedFields.length + ' fields set.'
+      : 'Configuration inferred from the VIN decode. Confirm it and the figures redraw to match — rear drum vs disc and cylinder count both change what you see.') +
+    '</div></div>' +
+    '<button class="btn sm ghost" onclick="editConfig()">' + (C.confirmed ? 'Edit configuration' : 'Confirm configuration') + '</button></div>'
+    : 'Showing generic reference diagrams. Add a vehicle and the figures redraw to its configuration.';
   document.getElementById('sysgrid').innerHTML = SYSTEMS.map(s =>
     '<div class="sys ' + (s.id === SYS_STATE.system ? 'on' : '') + '" onclick="pickSystem(\'' + s.id + '\')">' +
     ic(s.ic, 26) + '<b>' + s.n + '</b><span>' + (DIAGRAMS[s.id] ? 'drawn · clickable' : 'from data feed') + '</span></div>').join('');
@@ -147,12 +216,29 @@ function drawSystem() {
     '<span style="flex:1"></span>' +
     (SYS_STATE.system === 'brakes' ? '<button class="layer" onclick="explode()">Exploded view</button>' : '');
 
-  cv.innerHTML = '<div class="zoomctl"><button onclick="zoomD(1.25)">+</button><button onclick="zoomD(.8)">&minus;</button><button onclick="zoomD(0)" style="font-size:12px">&#10226;</button></div>' + SVGS[SYS_STATE.system]();
-  kl.innerHTML = d.key.map(k =>
+  const C = vconf();
+  cv.innerHTML = '<div class="zoomctl"><button onclick="zoomD(1.25)">+</button><button onclick="zoomD(.8)">&minus;</button><button onclick="zoomD(0)" style="font-size:12px">&#10226;</button></div>' + SVGS[SYS_STATE.system](C);
+
+  const key = typeof d.key === 'function' ? d.key(C) : d.key;
+  kl.innerHTML = key.map(k =>
     '<button class="keyrow" data-k="' + k[1] + '" onclick="inspect(\'' + k[1] + '\')"><span class="n">' + k[0] + '</span><span>' + KB[k[1]].n + '</span></button>').join('');
   applyLayers(); bindHotspots(); applyZoom();
   rc.innerHTML = d.chips.map(c => '<button class="chip" onclick="refPanel(\'' + c.replace(/'/g, "\\'") + '\')">' + c + '</button>').join('');
-  ft.textContent = d.foot;
+  ft.innerHTML = esc(d.foot) +
+    '<br><b>Drawn for this vehicle:</b> ' + esc(configNoteFor(SYS_STATE.system, C)) +
+    ' <span class="src ' + (C.confirmed ? '' : 'sample') + '">' + (C.confirmed ? 'Owner-confirmed configuration' : 'Inferred from VIN') + '</span>' +
+    '<br>Representative of your configuration, not a VIN-exact factory illustration — that is licensed data. For the exact figure, ChiltonLibrary and EBSCO Auto Repair Source are free with a library card, and your make\'s service portal sells day passes.';
+}
+
+function configNoteFor(system, C) {
+  if (system === 'fuel') return C.isEV ? 'no fuel system on an EV' :
+    `${C.cylinders} injectors on the rail, ${C.injection === 'direct' ? 'direct injection' : C.injection === 'diesel-cr' ? 'common-rail diesel' : 'port injection'}, ${C.fuel_delivery} delivery`;
+  if (system === 'brakes') return `${C.front_brakes} front, ${C.rear_brakes} rear`;
+  if (system === 'cooling') return C.isEV ? 'battery and power-electronics loop' :
+    `${C.layout}${C.cylinders} block, ${C.fan} fan`;
+  if (system === 'charging') return `${C.isEV ? '12 V auxiliary system shown; HV side is not drawn' : 'belt-driven alternator, series-wound starter'}`;
+  if (system === 'wiring') return 'fuel pump circuit — terminal numbers are universal, the circuit numbers are representative';
+  return '';
 }
 function toggleLayer(k) { LAYER_STATE[SYS_STATE.system][k] = !LAYER_STATE[SYS_STATE.system][k]; drawSystem(); }
 function applyLayers() {
@@ -173,6 +259,54 @@ function applyZoom() {
   s.style.transformOrigin = 'center center';
   s.style.transition = 'transform .2s ease';
   s.style.transform = 'scale(' + SYS_STATE.zoom + ')';
+}
+
+/* ---------- configuration editor ---------- */
+function editConfig() {
+  const v = activeVehicle();
+  if (!v) return toast('Add a vehicle first', 'bad');
+  const c = VCONF.confirmed || {}, i = VCONF.inferred || {};
+  const cur = k => (c[k] != null && c[k] !== '' ? c[k] : (i[k] ?? ''));
+  const hint = k => (c[k] == null || c[k] === '') && i[k] ? ' <span class="chip grey" style="font-size:9px">from VIN</span>' : '';
+
+  openModal(modalHead('Configuration for ' + vLabel(v),
+    'The VIN gives us displacement, cylinders and drivetrain. It does not report rear disc vs drum, aspiration or injection type — and those change what the diagrams should show. Confirm once and the figures redraw.') +
+    '<div class="grid g3" style="gap:14px">' +
+    fld('Cylinders' + hint('cylinders'), sel('cf-cyl', [['', '—'], 3, 4, 5, 6, 8, 10, 12], cur('cylinders'))) +
+    fld('Layout' + hint('layout'), sel('cf-layout', [['', '—'], ['I', 'Inline'], ['V', 'V'], ['Flat', 'Flat / boxer'], ['Rotary', 'Rotary'], ['Electric', 'Electric']], cur('layout'))) +
+    fld('Aspiration', sel('cf-asp', [['na', 'Naturally aspirated'], ['turbo', 'Turbocharged'], ['twin-turbo', 'Twin-turbo'], ['supercharged', 'Supercharged']], cur('aspiration') || 'na')) +
+    '</div><div style="height:14px"></div>' +
+    '<div class="grid g3" style="gap:14px">' +
+    fld('Injection', sel('cf-inj', [['port', 'Port injection'], ['direct', 'Direct injection'], ['both', 'Port + direct'], ['diesel-cr', 'Diesel common rail'], ['carb', 'Carburettor']], cur('injection') || 'port')) +
+    fld('Front brakes', sel('cf-fb', [['disc', 'Disc'], ['drum', 'Drum']], cur('front_brakes') || 'disc')) +
+    fld('Rear brakes', sel('cf-rb', [['disc', 'Disc'], ['drum', 'Drum']], cur('rear_brakes') || 'disc')) +
+    '</div><div style="height:14px"></div>' +
+    '<div class="grid g3" style="gap:14px">' +
+    fld('Drivetrain' + hint('drive'), sel('cf-drive', [['', '—'], 'FWD', 'RWD', 'AWD', '4WD'], cur('drive'))) +
+    fld('Transmission' + hint('trans_type'), sel('cf-trans', [['', '—'], ['auto', 'Automatic'], ['manual', 'Manual'], ['cvt', 'CVT'], ['dct', 'Dual clutch'], ['ev-single', 'EV single speed']], cur('trans_type'))) +
+    fld('Cooling fan', sel('cf-fan', [['electric', 'Electric'], ['clutch', 'Mechanical / clutch']], cur('fan') || 'electric')) +
+    '</div><div style="height:14px"></div>' +
+    '<div class="grid g2" style="gap:14px">' +
+    fld('Fuel delivery', sel('cf-fd', [['returnless', 'Returnless'], ['return', 'Return style'], ['diesel', 'Diesel']], cur('fuel_delivery') || 'returnless')) +
+    fld('Battery location', sel('cf-batt', [['engine bay', 'Engine bay'], ['trunk', 'Trunk / cargo'], ['under seat', 'Under a seat']], cur('battery_location') || 'engine bay')) +
+    '</div><div style="height:14px"></div>' +
+    fld('Notes', inp('cf-notes', { value: c.notes || '', ph: 'Anything the figures should reflect' })) +
+    '<p class="note" style="margin:14px 0 16px">Not sure about rear brakes? Look through the wheel: a shiny machined disc with a caliper over it is disc; a plain cast drum with no caliper is drum. It is visible from outside on almost every vehicle.</p>' +
+    '<button class="btn block" onclick="saveConfig()">Save and redraw</button>', true);
+}
+
+async function saveConfig() {
+  const v = activeVehicle();
+  await API.req('PUT', '/vehicles/' + v.id + '/config', {
+    cylinders: intVal('cf-cyl'), layout: val('cf-layout'), aspiration: val('cf-asp'),
+    injection: val('cf-inj'), front_brakes: val('cf-fb'), rear_brakes: val('cf-rb'),
+    drive: val('cf-drive'), trans_type: val('cf-trans'), fan: val('cf-fan'),
+    fuel_delivery: val('cf-fd'), battery_location: val('cf-batt'), notes: val('cf-notes')
+  });
+  closeModal();
+  await loadVehicleConfig(true);
+  renderSystems();
+  toast('Configuration saved — figures redrawn', 'ok');
 }
 
 /* ---------- reference panels ---------- */
@@ -241,7 +375,11 @@ function symbolLegend() {
 }
 
 /* ---------- component inspector ---------- */
-const TABS = ['Overview', 'Specs', 'Torque', 'Testing', 'Failures', 'Parts'];
+const TABS = ['Overview', 'Specs', 'Torque', 'Testing', 'Failures', 'Tools', 'Parts'];
+const KB_SYSTEM = {
+  Brakes: 'brakes', Cooling: 'cooling', Fuel: 'fuel', Wiring: 'charging',
+  Charging: 'charging', Diagnosis: 'diagnostics'
+};
 function inspect(id) {
   const c = KB[id];
   if (!c) return;
@@ -269,6 +407,7 @@ function setTab(i) {
       '<div class="note" style="margin-top:2px">' + esc(t[1]) + '</div></div></div>').join(''),
     '<span class="mlabel">What usually goes wrong</span>' + c.fail.map((f, n) => '<div class="bullet"><span class="n">' + (n + 1) + '</span><div>' + esc(f) + '</div></div>').join('') +
     '<p class="note" style="margin-top:16px">Ranked by how often it turns out to be the cause, not by severity.</p>',
+    toolsPanel(c.n, KB_SYSTEM[c.s] || 'diagnostics', { flat: true }),
     '<span class="mlabel">Find this part</span><p class="note" style="margin:0 0 16px">Searches prefilled with ' +
     (activeVehicle() ? 'your ' + esc(vLabel(activeVehicle())) : 'your vehicle') + ' and this component.</p>' + partLinks(c.q)
   ][i];
@@ -330,7 +469,31 @@ function frame(title, fig) {
     '<text class="lbl s" x="896" y="30" text-anchor="end">' + fig + '</text>';
 }
 
-SVGS.brakes = function () {
+/* A disc corner and a drum corner, drawn at an arbitrary centre so the
+   rear axle can be either without duplicating the whole figure. */
+function discCorner(cx, cy) {
+  return '<g><circle cx="' + cx + '" cy="' + cy + '" r="70" fill="#F4F3FC" stroke="#2B2D42" stroke-width="1.8"/>' +
+    '<circle cx="' + cx + '" cy="' + cy + '" r="51" fill="#fff" stroke="#2B2D42" stroke-width="1.3"/>' +
+    '<circle cx="' + cx + '" cy="' + cy + '" r="26" fill="#DDD8FA" stroke="#2B2D42" stroke-width="1.6"/>' +
+    '<circle cx="' + cx + '" cy="' + cy + '" r="9" fill="#6C5CE7"/>' +
+    '<g stroke="#B9B3EC" stroke-width="1"><path d="M' + cx + ' ' + (cy - 50) + 'v24M' + cx + ' ' + (cy + 26) + 'v24M' +
+    (cx - 50) + ' ' + cy + 'h24M' + (cx + 26) + ' ' + cy + 'h24"/></g>' +
+    '<path d="M' + (cx + 26) + ' ' + (cy - 36) + 'a56 56 0 0 1 0 72h30a12 12 0 0 0 12-12v-48a12 12 0 0 0-12-12z" ' +
+    'fill="#E85D5D" stroke="#C33A3A" stroke-width="1.6"/>' +
+    '<rect x="' + (cx + 22) + '" y="' + (cy - 22) + '" width="7" height="44" rx="2" fill="#8B8AA5"/></g>';
+}
+function drumCorner(cx, cy) {
+  return '<g><circle cx="' + cx + '" cy="' + cy + '" r="64" fill="#F4F3FC" stroke="#2B2D42" stroke-width="1.8"/>' +
+    '<circle cx="' + cx + '" cy="' + cy + '" r="47" fill="#fff" stroke="#2B2D42" stroke-width="1.2" stroke-dasharray="4 3"/>' +
+    '<path d="M' + (cx - 28) + ' ' + (cy - 35) + 'a44 44 0 0 0 0 70" fill="none" stroke="#6C5CE7" stroke-width="6.5" stroke-linecap="round"/>' +
+    '<path d="M' + (cx + 28) + ' ' + (cy - 35) + 'a44 44 0 0 1 0 70" fill="none" stroke="#6C5CE7" stroke-width="6.5" stroke-linecap="round"/>' +
+    '<circle cx="' + cx + '" cy="' + cy + '" r="13" fill="#DDD8FA" stroke="#2B2D42" stroke-width="1.6"/></g>';
+}
+
+SVGS.brakes = function (C) {
+  C = C || vconf();
+  const rearDisc = C.rear_brakes === 'disc';
+  const rear = rearDisc ? discCorner : drumCorner;
   return '<svg viewBox="0 0 920 540" xmlns="http://www.w3.org/2000/svg">' +
     frame('BRAKING SYSTEM — HYDRAULIC LAYOUT', 'FIG. 1') +
     '<g class="L-fluid" stroke="#D89B00" stroke-width="4" fill="none" stroke-linecap="round">' +
@@ -356,16 +519,7 @@ SVGS.brakes = function () {
     '<g stroke="#B9B3EC" stroke-width="1"><path d="M164 334v24M164 410v24M114 384h24M190 384h24"/></g>' +
     '<path d="M190 348a56 56 0 0 1 0 72h30a12 12 0 0 0 12-12v-48a12 12 0 0 0-12-12z" fill="#E85D5D" stroke="#C33A3A" stroke-width="1.6"/>' +
     '<rect x="186" y="362" width="7" height="44" rx="2" fill="#8B8AA5"/></g>' +
-    '<g><circle cx="812" cy="168" r="64" fill="#F4F3FC" stroke="#2B2D42" stroke-width="1.8"/>' +
-    '<circle cx="812" cy="168" r="47" fill="#fff" stroke="#2B2D42" stroke-width="1.2" stroke-dasharray="4 3"/>' +
-    '<path d="M784 133a44 44 0 0 0 0 70" fill="none" stroke="#6C5CE7" stroke-width="6.5" stroke-linecap="round"/>' +
-    '<path d="M840 133a44 44 0 0 1 0 70" fill="none" stroke="#6C5CE7" stroke-width="6.5" stroke-linecap="round"/>' +
-    '<circle cx="812" cy="168" r="13" fill="#DDD8FA" stroke="#2B2D42" stroke-width="1.6"/></g>' +
-    '<g><circle cx="812" cy="384" r="64" fill="#F4F3FC" stroke="#2B2D42" stroke-width="1.8"/>' +
-    '<circle cx="812" cy="384" r="47" fill="#fff" stroke="#2B2D42" stroke-width="1.2" stroke-dasharray="4 3"/>' +
-    '<path d="M784 349a44 44 0 0 0 0 70" fill="none" stroke="#6C5CE7" stroke-width="6.5" stroke-linecap="round"/>' +
-    '<path d="M840 349a44 44 0 0 1 0 70" fill="none" stroke="#6C5CE7" stroke-width="6.5" stroke-linecap="round"/>' +
-    '<circle cx="812" cy="384" r="13" fill="#DDD8FA" stroke="#2B2D42" stroke-width="1.6"/></g>' +
+    rear(812, 168) + rear(812, 384) +
     '<g><circle cx="428" cy="116" r="45" fill="#E3DEFC" stroke="#2B2D42" stroke-width="1.8"/>' +
     '<circle cx="428" cy="116" r="29" fill="#fff" stroke="#2B2D42" stroke-width="1.2"/>' +
     '<rect x="392" y="108" width="10" height="16" rx="3" fill="#6C5CE7"/>' +
@@ -389,7 +543,9 @@ SVGS.brakes = function () {
     cal(3, 'prop_valve', 676, 214, 640, 238) +
     cal(4, 'abs_module', 492, 458, 522, 424) +
     cal(5, 'caliper', 264, 168, 234, 168) +
-    cal(6, 'drum', 886, 120, 860, 142) +
+    cal(6, rearDisc ? 'caliper' : 'drum', 886, 120, 860, 142) +
+    '<text class="lbl" x="700" y="86">REAR — ' + (rearDisc ? 'DISC' : 'DRUM') + '</text>' +
+    '<text class="lbl" x="120" y="86">FRONT — DISC</text>' +
     '<text class="lbl s" x="24" y="518">Hydraulic lines shown solid amber &middot; wheel speed sensor circuits shown grey dashed &middot; numbered balloons keyed to parts list</text></g>' +
     '<g class="L-spec"><rect x="286" y="288" width="200" height="70" rx="4" fill="#2B2D42"/>' +
     '<text x="304" y="311" font-family="Inter" font-size="10" fill="#B9B6D6">PAD MINIMUM THICKNESS</text>' +
@@ -397,7 +553,26 @@ SVGS.brakes = function () {
     '<text x="304" y="351" font-family="Inter" font-size="9" fill="#8B8AA5">Rotor discard 0.98 in &middot; runout 0.002 in</text></g></svg>';
 };
 
-SVGS.cooling = function () {
+SVGS.cooling = function (C) {
+  C = C || vconf();
+  const cyl = Math.max(0, C.cylinders || 0);
+  const vee = C.layout === 'V' && cyl >= 6;
+  // lay the bores out inside the block: two banks for a V, one for an inline
+  const bores = (() => {
+    if (!cyl) return '';
+    const perBank = vee ? Math.ceil(cyl / 2) : cyl;
+    const banks = vee ? 2 : 1;
+    let out = '';
+    for (let b = 0; b < banks; b++) {
+      for (let i = 0; i < (b === 1 ? cyl - perBank : perBank); i++) {
+        const x = 436 + i * (150 / Math.max(1, perBank));
+        const y = vee ? (b === 0 ? 228 : 320) : 274;
+        out += '<circle cx="' + x.toFixed(1) + '" cy="' + y + '" r="11" fill="#DDD8FA" stroke="#2B2D42" stroke-width="1.2"/>' +
+          '<circle cx="' + x.toFixed(1) + '" cy="' + y + '" r="4" fill="#8B8AA5"/>';
+      }
+    }
+    return out;
+  })();
   return '<svg viewBox="0 0 920 540" xmlns="http://www.w3.org/2000/svg">' +
     '<defs><linearGradient id="radg" x1="0" y1="0" x2="0" y2="1">' +
     '<stop offset="0%" stop-color="#F2B7B7"/><stop offset="55%" stop-color="#CDCEF0"/><stop offset="100%" stop-color="#ABCDF2"/></linearGradient></defs>' +
@@ -426,8 +601,10 @@ SVGS.cooling = function () {
     }) +
     '<circle cx="279" cy="274" r="16" fill="#6C5CE7"/><circle cx="279" cy="274" r="6" fill="#fff"/></g>' +
     '<g><rect x="414" y="196" width="186" height="154" rx="6" fill="#F4F3FC" stroke="#2B2D42" stroke-width="1.8"/>' +
-    '<g stroke="#8B8AA5" stroke-width="1" opacity=".5"><path d="M414 242h186M414 306h186M476 196v154M538 196v154"/></g>' +
-    '<text class="lbl s" x="507" y="278" text-anchor="middle">ENGINE BLOCK</text>' +
+    '<g stroke="#8B8AA5" stroke-width="1" opacity=".35"><path d="M414 242h186M414 306h186"/></g>' +
+    bores +
+    '<text class="lbl s" x="507" y="' + (vee ? 278 : 214) + '" text-anchor="middle">' +
+    (C.isEV ? 'DRIVE UNIT &amp; BATTERY LOOP' : 'ENGINE BLOCK — ' + (cyl ? C.layout + cyl : 'CONFIGURATION UNSET')) + '</text>' +
     '<circle cx="414" cy="300" r="29" fill="#DDD8FA" stroke="#2B2D42" stroke-width="1.8"/>' +
     '<circle cx="414" cy="300" r="14" fill="#fff" stroke="#2B2D42" stroke-width="1.5"/><circle cx="414" cy="300" r="4.5" fill="#6C5CE7"/>' +
     rep(6, i => {
@@ -463,7 +640,14 @@ SVGS.cooling = function () {
     '<text x="638" y="455" font-family="Inter" font-size="9" fill="#8B8AA5">Fully open 207 °F &middot; cap 15 psi &middot; 14.0 qt</text></g></svg>';
 };
 
-SVGS.fuel = function () {
+SVGS.fuel = function (C) {
+  C = C || vconf();
+  const cyl = Math.max(1, C.cylinders || 4);
+  const railX = 566, railW = 212;
+  const step = railW / (cyl + 0.6);              // spread the injectors across the rail
+  const injX = i => railX + step * (i + 0.6);
+  const injLabel = C.injection === 'direct' ? 'DIRECT INJECTORS'
+    : C.injection === 'diesel-cr' ? 'COMMON-RAIL INJECTORS' : 'PORT INJECTORS';
   return '<svg viewBox="0 0 920 540" xmlns="http://www.w3.org/2000/svg">' +
     frame('FUEL DELIVERY AND EVAPORATIVE EMISSION CONTROL', 'FIG. 3') +
     '<g class="L-fluid" stroke="#D89B00" stroke-width="5.5" fill="none" stroke-linecap="round">' +
@@ -489,8 +673,10 @@ SVGS.fuel = function () {
     '<circle cx="385" cy="185" r="8" fill="#8B8AA5"/></g>' +
     '<g><rect x="566" y="128" width="212" height="42" rx="5" fill="#EFEDFB" stroke="#2B2D42" stroke-width="1.8"/>' +
     '<rect x="578" y="140" width="188" height="18" rx="3" fill="#fff" opacity=".7"/>' +
-    rep(8, i => '<g><rect x="' + (582 + i * 24) + '" y="170" width="13" height="30" rx="2" fill="#6C5CE7"/><rect x="' + (584 + i * 24) + '" y="200" width="9" height="12" rx="2" fill="#8B8AA5"/></g>') +
-    '<text class="lbl s" x="672" y="153" text-anchor="middle">FUEL RAIL — 8 INJECTORS</text></g>' +
+    rep(cyl, i => '<g><rect x="' + injX(i).toFixed(1) + '" y="170" width="13" height="30" rx="2" fill="#6C5CE7"/>' +
+      '<rect x="' + (injX(i) + 2).toFixed(1) + '" y="200" width="9" height="12" rx="2" fill="#8B8AA5"/>' +
+      '<text class="lbl s" x="' + (injX(i) + 6.5).toFixed(1) + '" y="224" text-anchor="middle">' + (i + 1) + '</text></g>') +
+    '<text class="lbl s" x="672" y="153" text-anchor="middle">FUEL RAIL — ' + cyl + ' ' + injLabel + '</text></g>' +
     '<g><path d="M558 212h228v56a12 12 0 0 1-12 12H570a12 12 0 0 1-12-12z" fill="#F6F5FC" stroke="#2B2D42" stroke-width="1.6"/>' +
     '<text class="lbl s" x="672" y="250" text-anchor="middle">INTAKE MANIFOLD</text></g>' +
     '<g><rect x="590" y="382" width="92" height="90" rx="5" fill="#fff" stroke="#2B2D42" stroke-width="1.8"/>' +

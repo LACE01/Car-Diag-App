@@ -292,6 +292,17 @@ const SERVICE_INDEX = (() => {
 
 function serviceCount() { return SERVICE_INDEX.size; }
 
+/** Which system a service belongs to — used to pick the right tool kit. */
+function serviceSystem(label) {
+  const exact = SERVICE_INDEX.get(label);
+  if (exact) return exact.sys;
+  const l = String(label || '').toLowerCase();
+  for (const [name, meta] of SERVICE_INDEX) {
+    if (l && name.toLowerCase().includes(l)) return meta.sys;
+  }
+  return 'diagnostics';
+}
+
 /** Grouped <select> that fills a text field and its category select. */
 function serviceSelect(id, textId, catId) {
   return '<select class="inp" id="' + id + '" onchange="applyService(this.value,\'' + textId + '\',\'' + catId + '\')">' +

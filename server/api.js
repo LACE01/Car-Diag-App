@@ -13,6 +13,10 @@ import {
 } from './auth.js';
 import { nhtsa, normalizeVin, clusterComplaints, LIVE } from './nhtsa.js';
 import { geocode, nearbyStores, haversineMiles, BRANDS } from './stores.js';
+import {
+  epaEconomy, economyVsEpa, safetyRatings, investigations, communications,
+  altFuelStations, afdcFuelCodes, weatherContext, weatherRules
+} from './reference.js';
 import * as core from './core.js';
 
 export const api = express.Router();
@@ -904,16 +908,253 @@ api.get('/ref/dtc/:code', requireAuth, (req, res) => res.json(core.decodeDTC(req
 api.get('/ref/monitors', requireAuth, (req, res) => res.json({ monitors: core.MONITORS, driveCycle: core.DRIVE_CYCLE }));
 api.get('/ref/irs-rate/:year', requireAuth, (req, res) => res.json({ year: +req.params.year, rate: core.irsRate(req.params.year) }));
 
+/* ============================================================
+   FEDERAL REFERENCE DATA (EPA, ratings, investigations, TSBs)
+   Each of these is cached and degrades to "unavailable" rather
+   than throwing, so a missing panel never takes the page with it.
+   ============================================================ */
 api.get('/vehicles/:id/epa', requireAuth, wrap(async (req, res) => {
   const v = assertVehicle(req.user.id, +req.params.id);
-  const r = await nhtsa.epaMenu(v.year, v.make, v.model);
-  res.json({ options: r.data ?? null, source: r.source, note: 'EPA combined figures are the baseline your logged economy is compared against.' });
+  const epa = await epaEconomy(v);
+  const fuel = db.prepare('SELECT * FROM fuel_logs WHERE vehicle_id=? ORDER BY odometer').all(v.id);
+  const economy = core.computeEconomy(fuel, !!v.is_ev);
+  res.json({ epa, economy, compare: economyVsEpa(economy.average, epa) });
 }));
 
 api.get('/vehicles/:id/safety', requireAuth, wrap(async (req, res) => {
   const v = assertVehicle(req.user.id, +req.params.id);
-  const r = await nhtsa.safety(v.year, v.make, v.model);
-  res.json({ ratings: r.data?.Results ?? [], source: r.source });
+  res.json(await safetyRatings(v));
+}));
+
+api.get('/vehicles/:id/investigations', requireAuth, wrap(async (req, res) => {
+  const v = assertVehicle(req.user.id, +req.params.id);
+  res.json(await investigations(v));
+}));
+
+api.get('/vehicles/:id/communications', requireAuth, wrap(async (req, res) => {
+  const v = assertVehicle(req.user.id, +req.params.id);
+  res.json(await communications(v));
+}));
+
+api.get('/vehicles/:id/stations', requireAuth, wrap(async (req, res) => {
+  const v = assertVehicle(req.user.id, +req.params.id);
+  const u = db.prepare('SELECT home_lat, home_lon FROM users WHERE id=?').get(req.user.id);
+  const lat = parseFloat(req.query.lat) || u?.home_lat;
+  const lon = parseFloat(req.query.lon) || u?.home_lon;
+  if (lat == null) throw httpErr(400, 'No location set. Set one on the Find Parts screen.');
+  const codes = afdcFuelCodes(v.fuel, !!v.is_ev);
+  res.json(await altFuelStations({ lat, lon, radius: +req.query.radius || 25, fuelCodes: codes }));
+}));
+
+api.get('/weather', requireAuth, wrap(async (req, res) => {
+  const u = db.prepare('SELECT home_lat, home_lon FROM users WHERE id=?').get(req.user.id);
+  const lat = parseFloat(req.query.lat) || u?.home_lat;
+  const lon = parseFloat(req.query.lon) || u?.home_lon;
+  if (lat == null) return res.json({ available: false, reason: 'No location set.' });
+  res.json(await weatherContext({ lat, lon }));
+}));
+
+/* ---------- the attention board ---------- */
+api.get('/vehicles/:id/attention', requireAuth, wrap(async (req, res) => {
+  const v = assertVehicle(req.user.id, +req.params.id);
+  res.json(await attentionFor(v, req.user.id));
+}));
+
+async function attentionFor(v, userId) {
+  const d = vehicleDetail(v);
+  const u = db.prepare('SELECT home_lat, home_lon FROM users WHERE id=?').get(userId);
+
+  const [inv, comms, epa, wx] = await Promise.all([
+    investigations(v).catch(() => ({ available: false })),
+    communications(v).catch(() => ({ available: false })),
+    epaEconomy(v).catch(() => ({ available: false })),
+    u?.home_lat != null ? weatherContext({ lat: u.home_lat, lon: u.home_lon }).catch(() => ({ available: false }))
+      : Promise.resolve({ available: false })
+  ]);
+
+  const compare = epa.available ? economyVsEpa(d.economy.average, epa) : null;
+  const wxRules = weatherRules(wx, { battery: d.battery, tires: d.tires, vehicle: v });
+
+  const scored = core.scoreAttention({
+    vehicle: v,
+    recalls: d.recalls.filter(r => !r.dismissed),
+    investigations: inv.available ? inv.open : [],
+    reminders: d.reminders,
+    dtcs: d.dtcs,
+    battery: d.battery,
+    brakes: d.brakes,
+    tires: d.tires,
+    warranties: d.warranties,
+    documents: d.documents,
+    complaints: d.complaints,
+    communications: comms.available ? comms : null,
+    economy: d.economy,
+    epaCompare: compare,
+    weather: wxRules
+  });
+
+  return {
+    ...scored,
+    context: {
+      epa: epa.available ? epa : null,
+      epaCompare: compare,
+      investigations: inv,
+      communications: comms,
+      weather: wx
+    }
+  };
+}
+
+/* ---------- recall completion, modelled honestly ---------- */
+api.post('/recalls/:rid/status', requireAuth, wrap(async (req, res) => {
+  const r = ownedRow(req.user.id, 'recall_status', +req.params.rid);
+  const status = req.body?.completion_status;
+  const allowed = ['unknown', 'owner_marked_complete', 'verified'];
+  if (!allowed.includes(status)) throw httpErr(400, `completion_status must be one of ${allowed.join(', ')}`);
+
+  const methods = ['nhtsa_vin_lookup', 'dealer_paperwork', 'service_record', 'owner_recollection'];
+  const method = req.body?.verification_method;
+  if (status === 'verified' && !methods.includes(method)) {
+    throw httpErr(400, 'Marking a recall verified requires a verification_method: ' + methods.join(', ') +
+      '. "I think it was done" is owner_marked_complete, not verified.');
+  }
+
+  const d = {
+    completion_status: status,
+    completed: status === 'verified' || status === 'owner_marked_complete' ? 1 : 0,
+    completed_at: status === 'unknown' ? null : (req.body?.completed_at || new Date().toISOString().slice(0, 10)),
+    verification_method: status === 'verified' ? method : null,
+    verified_at: status === 'verified' ? new Date().toISOString() : null,
+    evidence_note: req.body?.evidence_note ?? null,
+    evidence_attachment_id: req.body?.evidence_attachment_id ?? null
+  };
+  audit(req.user.id, r.vehicle_id, 'recall.status', { campaign: r.campaign, status, method });
+  res.json({
+    recall: update('recall_status', r.id, d),
+    note: status === 'owner_marked_complete'
+      ? 'Recorded as owner-marked. This is your recollection, not proof the dealer performed the remedy — a buyer or a shop should still check the VIN at nhtsa.gov/recalls.'
+      : status === 'verified'
+        ? 'Recorded as verified, with the method attached to the record.'
+        : 'Reset to unknown.'
+  });
+}));
+
+/* ---------- engine hours ---------- */
+api.post('/vehicles/:id/hours', requireAuth, wrap(async (req, res) => {
+  const v = assertVehicle(req.user.id, +req.params.id, true);
+  const hours = parseFloat(req.body?.hours);
+  if (!Number.isFinite(hours) || hours < 0) throw httpErr(400, 'Engine hours must be a positive number.');
+  const row = insert('hour_readings', {
+    vehicle_id: v.id, hours, odometer: req.body?.odometer ?? v.mileage,
+    source: req.body?.source || 'manual', note: req.body?.note || null
+  });
+  if (hours >= (v.engine_hours || 0)) {
+    db.prepare('UPDATE vehicles SET engine_hours=?, hours_source=? WHERE id=?').run(hours, row.source, v.id);
+  }
+  const prev = db.prepare('SELECT * FROM hour_readings WHERE vehicle_id=? ORDER BY at DESC LIMIT 2').all(v.id);
+  let idleRatio = null;
+  if (prev.length === 2 && prev[0].odometer && prev[1].odometer) {
+    const dh = prev[0].hours - prev[1].hours, dm = prev[0].odometer - prev[1].odometer;
+    if (dh > 0) idleRatio = +(dm / dh).toFixed(1);   // average mph over the period
+  }
+  res.status(201).json({
+    reading: row, engine_hours: hours, avgSpeed: idleRatio,
+    note: idleRatio != null && idleRatio < 20
+      ? `Averaging ${idleRatio} mph over that period — that is a lot of idle time. On an hour-metered schedule, one hour of idling is roughly 25–33 miles of engine wear, which is exactly why odometer-only intervals under-service a truck like this.`
+      : null
+  });
+}));
+
+api.get('/vehicles/:id/hours', requireAuth, wrap(async (req, res) => {
+  const v = assertVehicle(req.user.id, +req.params.id);
+  res.json({ readings: db.prepare('SELECT * FROM hour_readings WHERE vehicle_id=? ORDER BY at DESC').all(v.id) });
+}));
+
+/* ---------- vehicle configuration (drives the diagrams) ---------- */
+const CONFIG_FIELDS = ['cylinders', 'layout', 'aspiration', 'injection', 'rear_brakes', 'front_brakes',
+  'abs', 'drive', 'trans_type', 'cooling', 'fan', 'fuel_delivery', 'battery_location', 'notes'];
+
+api.get('/vehicles/:id/config', requireAuth, wrap(async (req, res) => {
+  const v = assertVehicle(req.user.id, +req.params.id);
+  const row = db.prepare('SELECT * FROM vehicle_config WHERE vehicle_id=?').get(v.id);
+  res.json({ config: row || null, inferred: inferConfig(v) });
+}));
+
+api.put('/vehicles/:id/config', requireAuth, wrap(async (req, res) => {
+  const v = assertVehicle(req.user.id, +req.params.id, true);
+  const d = pick(req.body || {}, CONFIG_FIELDS);
+  d.vehicle_id = v.id;
+  d.confirmed_at = new Date().toISOString();
+  d.updated_at = d.confirmed_at;
+  // vehicle_config is keyed on vehicle_id, not a synthetic id, so the generic
+  // insert() helper (which reads back by id) does not apply here.
+  const existing = db.prepare('SELECT vehicle_id FROM vehicle_config WHERE vehicle_id=?').get(v.id);
+  if (existing) {
+    const keys = Object.keys(d).filter(k => k !== 'vehicle_id');
+    if (keys.length) {
+      db.prepare(`UPDATE vehicle_config SET ${keys.map(k => k + '=?').join(',')} WHERE vehicle_id=?`)
+        .run(...keys.map(k => d[k]), v.id);
+    }
+  } else {
+    const keys = Object.keys(d);
+    db.prepare(`INSERT INTO vehicle_config (${keys.join(',')}) VALUES (${keys.map(() => '?').join(',')})`)
+      .run(...keys.map(k => d[k]));
+  }
+  audit(req.user.id, v.id, 'config.update', Object.keys(d).join(','));
+  res.json({ config: db.prepare('SELECT * FROM vehicle_config WHERE vehicle_id=?').get(v.id) });
+}));
+
+/** Best guess from the VIN decode, clearly separated from what the owner confirmed. */
+function inferConfig(v) {
+  const spec = v.spec_json ? safeJson(v.spec_json) : null;
+  const cyl = parseInt(spec?.EngineCylinders || 0, 10) || null;
+  const eng = String(v.engine || '');
+  const layout = v.is_ev ? 'Electric'
+    : /V\d/.test(eng) ? 'V' : /I\d/.test(eng) ? 'I' : null;
+  const drive = String(v.drive || '').toUpperCase();
+  return {
+    cylinders: cyl || (eng.match(/[IV](\d+)/) ? +eng.match(/[IV](\d+)/)[1] : null),
+    layout,
+    aspiration: /turbo/i.test(spec?.OtherEngineInfo || '') ? 'turbo' : null,
+    injection: /diesel/i.test(v.fuel || '') ? 'diesel-cr' : null,
+    drive: drive.includes('4WD') || drive.includes('4X4') ? '4WD'
+      : drive.includes('AWD') ? 'AWD'
+        : drive.includes('REAR') ? 'RWD'
+          : drive.includes('FRONT') ? 'FWD' : null,
+    trans_type: v.is_ev ? 'ev-single' : /manual/i.test(v.trans || '') ? 'manual'
+      : /cvt/i.test(v.trans || '') ? 'cvt' : /auto/i.test(v.trans || '') ? 'auto' : null,
+    source: 'inferred from the VIN decode — confirm anything the diagrams depend on'
+  };
+}
+function safeJson(s) { try { return JSON.parse(s); } catch { return null; } }
+
+/* ---------- tools owned ---------- */
+api.get('/tools', requireAuth, wrap(async (req, res) => {
+  const u = db.prepare('SELECT preferred_brands FROM users WHERE id=?').get(req.user.id);
+  res.json({
+    tools: db.prepare('SELECT * FROM tools WHERE user_id=?').all(req.user.id),
+    preferredBrands: String(u?.preferred_brands || 'icon,milwaukee').split(',').filter(Boolean)
+  });
+}));
+
+api.post('/tools', requireAuth, wrap(async (req, res) => {
+  const d = pick(req.body || {}, ['tool_id', 'owned', 'brand', 'model', 'note', 'acquired_at']);
+  if (!d.tool_id) throw httpErr(400, 'tool_id is required.');
+  d.user_id = req.user.id;
+  db.prepare(`INSERT INTO tools (user_id,tool_id,owned,brand,model,note,acquired_at)
+              VALUES (?,?,?,?,?,?,?)
+              ON CONFLICT(user_id,tool_id) DO UPDATE SET
+                owned=excluded.owned, brand=excluded.brand, model=excluded.model,
+                note=excluded.note, acquired_at=excluded.acquired_at`)
+    .run(req.user.id, d.tool_id, d.owned ?? 1, d.brand ?? null, d.model ?? null, d.note ?? null, d.acquired_at ?? null);
+  res.json({ tool: db.prepare('SELECT * FROM tools WHERE user_id=? AND tool_id=?').get(req.user.id, d.tool_id) });
+}));
+
+api.put('/me/brands', requireAuth, wrap(async (req, res) => {
+  const list = Array.isArray(req.body?.brands) ? req.body.brands : String(req.body?.brands || '').split(',');
+  const clean = list.map(s => String(s).trim().toLowerCase()).filter(Boolean).slice(0, 8).join(',');
+  db.prepare('UPDATE users SET preferred_brands=? WHERE id=?').run(clean, req.user.id);
+  res.json({ preferredBrands: clean.split(',').filter(Boolean) });
 }));
 
 /* ============================================================
@@ -956,7 +1197,7 @@ api.get('/stores/nearby', requireAuth, wrap(async (req, res) => {
   const radius = parseFloat(req.query.radius) || 25;
   const out = await nearbyStores({ lat, lon, radiusMiles: radius });
 
-  const saved = new Set(db.prepare('SELECT osm_type || ":" || osm_id AS k FROM stores WHERE user_id=?')
+  const saved = new Set(db.prepare("SELECT osm_type || ':' || osm_id AS k FROM stores WHERE user_id=?")
     .all(req.user.id).map(r => r.k));
   for (const s of out.stores) s.saved = saved.has(`${s.osm_type}:${s.osm_id}`);
 

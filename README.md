@@ -95,6 +95,100 @@ Five fully drawn, layered, clickable figures — brakes, cooling, fuel/EVAP, fue
 and charging/starting. Toggle layers, zoom, tap a numbered callout balloon or the parts list
 to open the component inspector with specs, torque, test procedure, common failures and part links.
 
+### What needs attention
+
+The differentiator is not another VIN decoder. It is a per-vehicle timeline that joins VIN facts,
+federal safety data, scan data, maintenance evidence and real operating cost — **with the source
+and confidence attached to every line**.
+
+Four levels, sorted worst-first:
+
+| Level | What lands here |
+|---|---|
+| **Critical** | Unremedied safety recall · open federal investigation · fault on a brake / steering / airbag / fire path · tires at 2/32 |
+| **High** | Pending or permanent DTC · overdue on both time and mileage · failed battery test · pads under 3 mm |
+| **Medium** | Repeated complaint cluster · TSB cluster on one component · economy far below EPA · warranty about to lapse |
+| **Info** | Routine upcoming maintenance · broad patterns · rating context |
+
+Every item shows `SOURCE` and `CONFIDENCE`. "31 owner complaints mention steering" is tagged
+**LOW — unverified reports about the vehicle line, not a finding about your VIN**. A DTC read off
+the car is tagged as the highest-confidence data in the app. That distinction is the product.
+
+### Recall completion, modelled honestly
+
+The free recalls API tells you a campaign **applies to a year/make/model**. It cannot tell you
+whether **your VIN** was remedied. So those are separate facts:
+
+```
+campaign_applies      always true if it came back from NHTSA
+completion_status     unknown | owner_marked_complete | verified
+verification_method   nhtsa_vin_lookup | dealer_paperwork | service_record | owner_recollection
+verified_at
+evidence_note
+```
+
+Marking something `verified` **requires** a method, and the API rejects the attempt without one.
+"Owner recollection" is explicitly not verification. A history report that says "verified" when it
+means "the seller ticked a box" is worth nothing to a buyer, so the app refuses to blur them.
+
+### Federal data on Vehicle Health
+
+- **NHTSA investigations** — open and closed defect investigations for the vehicle line, shown as
+  *Active federal investigation* with component, opening date and status. Often the earliest public
+  signal that something systemic exists. Labelled as not-a-recall and not-a-finding.
+- **Manufacturer communications (TSBs)** — bulletins, service campaigns, dealer notices and warranty
+  extensions, clustered by component. Presented as **subject lines and context, not free repair
+  instructions** — the full document is the manufacturer's copyrighted material, and a TSB does not
+  mean the repair is covered.
+- **NCAP safety ratings** — two-step lookup (find the tested variant, then pull its stars), clearly
+  labelled as coverage for the *tested configuration*, not a VIN-specific assessment.
+- **EPA fuel economy** — official city/highway/combined, annual fuel cost, CO₂, MPGe and range,
+  matched by year/make/model/trim after the vPIC decode, and compared against your tank-to-tank
+  average with an interpretation of the gap.
+- **NWS weather rules** — only prompts that earn their place: freezing forecast against a marginal
+  battery, a 25 °F swing against tire pressure, hail and flood alerts, rain forecast against tires
+  already at 4/32.
+- **DOE AFDC stations** — alt-fuel and charging stations, and only for vehicles that can use them.
+  Runs on NREL's shared `DEMO_KEY`; set `AFDC_API_KEY` for a free personal key.
+
+Every one of these caches server-side and degrades to "unavailable" rather than throwing. NHTSA's
+non-vPIC endpoint paths are not formally documented, so each lookup tries a list of candidates and
+remembers whichever works.
+
+### Engine hours
+
+Miles are the wrong unit for a diesel, a work truck, or anything that idles for a living. Log hours
+and any interval can trigger on hours as well as miles and time — first leg to arrive wins. The app
+computes your lifetime miles-per-hour and tells you when a mileage-only schedule is under-servicing
+the engine (one hour of idle ≈ 25–33 miles of wear).
+
+### Tools for the job
+
+Every service and every diagram component has a tool list, grouped by kind — safety, lifting, hand,
+power, measurement, specialty, fluids, consumables. Brand preference is **ICON** (hand tools) and
+**Milwaukee** (cordless, lighting, test & measure), because that split is real rather than marketing.
+
+Where neither makes the tool — spring compressors, smoke machines, ball joint presses, HV gloves —
+the entry says **"Neither ICON nor Milwaukee makes this"** and names what to look for instead.
+Several of those are free to borrow from a parts store loaner programme, which is usually the right
+answer for a tool you will use twice. Tool *types*, never part numbers: brand line-ups change and a
+stale SKU is worse than none. Tap any tool to record that you own it.
+
+### Configuration-aware diagrams
+
+The figures are drawn from the decoded VIN plus a configuration you confirm once:
+
+- cylinder count sets the number of injectors on the fuel rail and the bores in the block
+- V vs inline changes the block layout
+- rear disc vs drum swaps the entire rear axle in the brake figure, and the parts list with it
+- injection type relabels the rail: port, direct, or common-rail diesel
+- EV relabels the cooling loop as battery and power electronics
+
+vPIC does not report rear brake type, aspiration or injection, so the app asks instead of guessing,
+and shows which fields came from the VIN versus from you. **These are representative of your
+configuration, not VIN-exact factory illustrations** — that is licensed data. The footer says so and
+points at ChiltonLibrary and EBSCO Auto Repair Source, free with a library card.
+
 ### Parts
 
 **Store locator.** Real nearby AutoZone, O'Reilly, NAPA, Advance and Carquest — address, phone,
