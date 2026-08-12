@@ -1,10 +1,14 @@
+# Note: test/ is deliberately NOT ignored — the Dockerfile copies it so you can
+# run `docker compose exec garage node test/smoke.mjs http://127.0.0.1:2026`
+# against the live container. It has no dependencies and adds ~8 kB.
 node_modules
 npm-debug.log
 .git
 .gitignore
+.github
 data
 *.db
 *.db-wal
 *.db-shm
 .DS_Store
-test
+README.md
