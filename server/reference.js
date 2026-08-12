@@ -7,24 +7,20 @@
                             against
      NHTSA SafetyRatings    two-step: find the tested variant, then
                             pull its stars
-     NHTSA investigations   open/closed federal defect investigations
-                            for the vehicle line. More urgent than a
-                            complaint cluster and often the earliest
-                            public warning of a systemic problem
-     NHTSA manufacturer     TSBs, service campaigns, dealer notices,
-       communications       warranty extensions. Presented as context,
-                            NOT as free repair instructions and NOT as
-                            a promise that the work is covered
+     (investigations and manufacturer communications live in
+      ingest.js — NHTSA publishes those as bulk files only)
      DOE AFDC / NREL        alternative fuel stations, gated on the
                             vehicle's actual fuel type
      NWS                    active alerts and forecast, used only for
                             maintenance rules that earn their place
 
-   Endpoint paths on api.nhtsa.gov are not versioned or formally
-   documented for every product, so each lookup takes a list of
-   candidate URLs and uses the first that returns usable JSON. When
-   all of them fail the feature reports "unavailable" instead of
-   throwing — a missing panel is acceptable, a broken page is not.
+   Every lookup here reports "unavailable" rather than throwing. A
+   missing panel is acceptable; a broken page is not.
+
+   Naming differs between all three services for the same vehicle, so
+   nothing is sent blind — we pull each service's own make/model list
+   and match against it. vPIC says "F-150", EPA says "F150 Pickup 2WD",
+   NCAP says "F-150 SUPER CREW".
    ============================================================ */
 import { db } from './db.js';
 
@@ -34,8 +30,6 @@ const DAY = 86400e3;
 const TTL = {
   epa: 90 * DAY,
   safety: 30 * DAY,
-  investigations: 2 * DAY,
-  communications: 7 * DAY,
   stations: 7 * DAY,
   weather: 20 * 60e3      // 20 minutes; alerts go stale fast
 };
@@ -55,8 +49,10 @@ function cachePut(key, data) {
 }
 
 async function getJson(url, ms = 12000) {
+  // fueleconomy.gov defaults to XML and only returns JSON when asked — the
+  // Accept header is not optional there.
   const r = await fetch(url, {
-    headers: { 'User-Agent': UA, accept: 'application/json' },
+    headers: { 'User-Agent': UA, Accept: 'application/json' },
     signal: AbortSignal.timeout(ms)
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -65,29 +61,29 @@ async function getJson(url, ms = 12000) {
   return r.json();
 }
 
+/** fueleconomy.gov and NHTSA return one object when there is one result. */
+const arr = x => (x == null ? [] : Array.isArray(x) ? x : [x]);
+
 /**
- * Try each candidate URL in order; first usable response wins, and we
- * remember which one worked so later calls go straight to it.
+ * Vehicle naming differs between every one of these services. vPIC says
+ * "F-150"; EPA says "F150 Pickup 2WD"; NCAP says "F-150 SUPER CREW". So
+ * never send our string blind — pull the service's own list and match
+ * against it.
  */
-const workingUrl = new Map();
-async function firstWorking(family, urls, accept = () => true) {
-  const ordered = workingUrl.has(family)
-    ? [urls[workingUrl.get(family)], ...urls.filter((_, i) => i !== workingUrl.get(family))]
-    : urls;
-  const errors = [];
-  for (const url of ordered) {
-    try {
-      const j = await getJson(url);
-      if (accept(j)) {
-        workingUrl.set(family, urls.indexOf(url));
-        return { data: j, url };
-      }
-      errors.push(`${url} → shape not recognised`);
-    } catch (e) { errors.push(`${url} → ${e.message}`); }
-  }
-  const err = new Error(`No working endpoint for ${family}`);
-  err.attempts = errors;
-  throw err;
+function bestMatches(candidates, want, { all = false } = {}) {
+  const squash = s => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const w = squash(want);
+  if (!w) return [];
+  const scored = candidates.map(c => {
+    const s = squash(c.label ?? c);
+    let score = 0;
+    if (s === w) score = 100;
+    else if (s.startsWith(w)) score = 80 - Math.min(20, s.length - w.length);
+    else if (s.includes(w)) score = 60;
+    else if (w.includes(s) && s.length >= 3) score = 40;
+    return { c, score };
+  }).filter(x => x.score > 0).sort((a, b) => b.score - a.score);
+  return all ? scored.map(x => x.c) : scored.slice(0, 1).map(x => x.c);
 }
 
 async function cached(key, ttl, loader) {
@@ -99,28 +95,57 @@ async function cached(key, ttl, loader) {
     return { ...fresh, source: 'live', fetchedAt: new Date().toISOString() };
   } catch (e) {
     if (hit) return { ...hit.data, source: 'stale', fetchedAt: hit.fetchedAt, warning: String(e.message) };
-    return { available: false, source: 'unavailable', error: String(e.message), attempts: e.attempts || null };
+    return { available: false, source: 'unavailable', error: String(e.message) };
   }
 }
 
 /* ============================================================
    EPA fuel economy
    ============================================================ */
-export async function epaEconomy({ year, make, model, trim }) {
+export async function epaEconomy({ year, make, model, trim, engine, drive }) {
   const key = `epa:${year}:${make}:${model}:${trim || ''}`.toLowerCase();
   return cached(key, TTL.epa, async () => {
     const base = 'https://www.fueleconomy.gov/ws/rest/vehicle';
-    const menu = await getJson(`${base}/menu/options?year=${year}&make=${encodeURIComponent(make)}&model=${encodeURIComponent(model)}`);
-    let options = menu?.menuItem ? (Array.isArray(menu.menuItem) ? menu.menuItem : [menu.menuItem]) : [];
-    if (!options.length) throw new Error('EPA has no record for that year/make/model');
 
-    // If we know the trim, prefer the option whose text mentions it.
-    let chosen = options[0];
-    if (trim) {
-      const t = String(trim).toLowerCase();
-      const better = options.find(o => String(o.text || '').toLowerCase().includes(t));
-      if (better) chosen = better;
+    // 1. EPA's make list — "FORD" from vPIC has to become "Ford"
+    const makes = arr((await getJson(`${base}/menu/make?year=${year}`))?.menuItem)
+      .map(m => ({ label: m.text, value: m.value }));
+    const epaMake = bestMatches(makes, make)[0];
+    if (!epaMake) throw new Error(`EPA lists no make matching "${make}" for ${year}`);
+
+    // 2. EPA's model list — "F-150" has to become "F150 Pickup 2WD" (or 4WD)
+    const models = arr((await getJson(`${base}/menu/model?year=${year}&make=${encodeURIComponent(epaMake.value)}`))?.menuItem)
+      .map(m => ({ label: m.text, value: m.value }));
+    let epaModels = bestMatches(models, model, { all: true });
+    if (!epaModels.length) throw new Error(`EPA lists no model matching "${model}" under ${epaMake.label} ${year}`);
+
+    // 3. Prefer the drivetrain we know about — EPA encodes 2WD/4WD in the name
+    if (drive) {
+      const d = /4|AWD|ALL/i.test(drive) ? '4WD' : '2WD';
+      const better = epaModels.filter(m => m.label.toUpperCase().includes(d));
+      if (better.length) epaModels = better;
     }
+    const epaModel = epaModels[0];
+
+    // 4. Engine/transmission variants under that model
+    const options = arr((await getJson(
+      `${base}/menu/options?year=${year}&make=${encodeURIComponent(epaMake.value)}&model=${encodeURIComponent(epaModel.value)}`))?.menuItem);
+    if (!options.length) throw new Error(`EPA has no variants for ${epaMake.label} ${epaModel.label} ${year}`);
+
+    // 5. Match the engine if we know it — the option text carries "6 cyl, 3.5 L"
+    let chosen = options[0];
+    const displ = String(engine || '').match(/(\d\.\d)\s*L/i)?.[1];
+    const cyl = String(engine || '').match(/[IV](\d+)/i)?.[1];
+    const scoreOpt = o => {
+      const t = String(o.text || '');
+      let s = 0;
+      if (displ && t.includes(displ)) s += 10;
+      if (cyl && new RegExp(`\\b${cyl} cyl`).test(t)) s += 6;
+      if (trim && t.toLowerCase().includes(String(trim).toLowerCase())) s += 3;
+      return s;
+    };
+    const ranked = options.map(o => ({ o, s: scoreOpt(o) })).sort((a, b) => b.s - a.s);
+    if (ranked[0].s > 0) chosen = ranked[0].o;
 
     const v = await getJson(`${base}/${chosen.value}`);
     const n = x => (x == null || x === '' ? null : Number(x));
@@ -172,15 +197,29 @@ export function economyVsEpa(loggedAvg, epa) {
 export async function safetyRatings({ year, make, model }) {
   const key = `safety:${year}:${make}:${model}`.toLowerCase();
   return cached(key, TTL.safety, async () => {
-    const list = await getJson(
-      `https://api.nhtsa.gov/SafetyRatings/modelyear/${year}/make/${encodeURIComponent(make)}/model/${encodeURIComponent(model)}`);
-    const variants = list?.Results || [];
-    if (!variants.length) throw new Error('No rated variant for that year/make/model');
+    const B = 'https://api.nhtsa.gov/SafetyRatings';
+
+    // NCAP names its own models: vPIC "F-150" is "F-150 SUPER CREW",
+    // "F-150 SUPERCAB" and "F-150 REGULAR CAB" here. Ask, then match.
+    const modelList = ((await getJson(`${B}/modelyear/${year}/make/${encodeURIComponent(make)}`))?.Results || [])
+      .map(r => ({ label: r.Model, value: r.Model }));
+    if (!modelList.length) throw new Error(`NCAP has no models for ${make} ${year}`);
+
+    const matched = bestMatches(modelList, model, { all: true }).slice(0, 4);
+    if (!matched.length) throw new Error(`NCAP rated no variant matching "${model}" for ${make} ${year}`);
+
+    const variants = [];
+    for (const m of matched) {
+      const res = (await getJson(`${B}/modelyear/${year}/make/${encodeURIComponent(make)}/model/${encodeURIComponent(m.value)}`))?.Results || [];
+      variants.push(...res);
+    }
+    if (!variants.length) throw new Error('Model matched but NCAP returned no tested variant');
 
     const rated = [];
-    for (const v of variants.slice(0, 4)) {
+    for (const v of variants.slice(0, 6)) {
+      if (!v.VehicleId) continue;
       try {
-        const d = await getJson(`https://api.nhtsa.gov/SafetyRatings/VehicleId/${v.VehicleId}`);
+        const d = await getJson(`${B}/VehicleId/${v.VehicleId}`);
         const r = d?.Results?.[0];
         if (!r) continue;
         rated.push({
@@ -217,78 +256,16 @@ function star(v) {
 }
 
 /* ============================================================
-   NHTSA investigations
+   NHTSA investigations and manufacturer communications
+
+   Both moved to server/ingest.js — they are DOWNLOAD ONLY. NHTSA
+   publishes no per-vehicle JSON endpoint for either; every candidate
+   path returns API Gateway's "Missing Authentication Token", and
+   products/vehicle/makes?issueType=i returns zero rows. Confirmed
+   against nhtsa.gov/nhtsa-datasets-and-apis, which lists an API
+   section for ratings, recalls and complaints and a Download-Data
+   section only for investigations and manufacturer communications.
    ============================================================ */
-export async function investigations({ year, make, model }) {
-  const key = `inv:${year}:${make}:${model}`.toLowerCase();
-  return cached(key, TTL.investigations, async () => {
-    const mk = encodeURIComponent(make), md = encodeURIComponent(model);
-    const { data } = await firstWorking('investigations', [
-      `https://api.nhtsa.gov/investigations/investigationsByVehicle?make=${mk}&model=${md}&modelYear=${year}`,
-      `https://api.nhtsa.gov/products/vehicle/investigations?make=${mk}&model=${md}&modelYear=${year}`,
-      `https://api.nhtsa.gov/investigation/investigationsByVehicle?make=${mk}&model=${md}&modelYear=${year}`
-    ], j => Array.isArray(j?.results) || Array.isArray(j?.Results));
-
-    const rows = data.results || data.Results || [];
-    const items = rows.map(x => ({
-      number: x.nhtsaActionNumber || x.actionNumber || x.NHTSAActionNumber || null,
-      type: x.actionType || x.type || null,
-      component: x.component || x.components || null,
-      summary: x.summary || x.subject || null,
-      openDate: x.openDate || x.dateOpened || null,
-      closeDate: x.closeDate || x.dateClosed || null,
-      status: (x.closeDate || x.dateClosed) ? 'closed' : 'open'
-    }));
-    return {
-      available: true,
-      open: items.filter(i => i.status === 'open'),
-      closed: items.filter(i => i.status === 'closed'),
-      total: items.length,
-      caveat: 'A federal investigation is not a finding of a defect and is not a recall. It means NHTSA is looking at a pattern on this vehicle line — which is often the earliest public signal that something systemic exists.'
-    };
-  });
-}
-
-/* ============================================================
-   NHTSA manufacturer communications (TSBs)
-   ============================================================ */
-export async function communications({ year, make, model }) {
-  const key = `mc:${year}:${make}:${model}`.toLowerCase();
-  return cached(key, TTL.communications, async () => {
-    const mk = encodeURIComponent(make), md = encodeURIComponent(model);
-    const { data } = await firstWorking('communications', [
-      `https://api.nhtsa.gov/manufacturer-communications/manufacturerCommunicationsByVehicle?make=${mk}&model=${md}&modelYear=${year}`,
-      `https://api.nhtsa.gov/products/vehicle/manufacturerCommunications?make=${mk}&model=${md}&modelYear=${year}`,
-      `https://api.nhtsa.gov/manufacturerCommunications/manufacturerCommunicationsByVehicle?make=${mk}&model=${md}&modelYear=${year}`
-    ], j => Array.isArray(j?.results) || Array.isArray(j?.Results));
-
-    const rows = data.results || data.Results || [];
-    const items = rows.map(x => ({
-      number: x.communicationNumber || x.bulletinNumber || x.nhtsaItemNumber || null,
-      date: x.communicationDate || x.date || x.dateAdded || null,
-      component: x.component || x.components || null,
-      subject: x.summary || x.subject || x.description || null,
-      documents: x.documents || null
-    })).filter(i => i.subject || i.number);
-
-    // cluster by component so a wall of bulletins becomes a shortlist
-    const byComponent = {};
-    for (const i of items) {
-      const c = String(i.component || 'OTHER').split(/[,:]/)[0].trim().toUpperCase();
-      (byComponent[c] ||= []).push(i);
-    }
-
-    return {
-      available: true,
-      items,
-      total: items.length,
-      byComponent: Object.entries(byComponent)
-        .map(([component, list]) => ({ component, count: list.length, latest: list[0]?.date || null }))
-        .sort((a, b) => b.count - a.count),
-      caveat: 'These are manufacturer communications filed with NHTSA — bulletins, service campaigns and dealer notices. A TSB is diagnostic context or a procedure reference. It is NOT a recall, it does NOT mean the repair is free, and the full text is the manufacturer\'s copyrighted document, which is why only the subject line is shown here.'
-    };
-  });
-}
 
 /* ============================================================
    DOE AFDC alternative fuel stations

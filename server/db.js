@@ -500,6 +500,36 @@ const MIGRATIONS = [
     -- baseline for the engine-hour leg of an interval
     ALTER TABLE reminders ADD COLUMN last_done_hours REAL;
     `
+  },
+  {
+    id: '004_nhtsa_bulk',
+    sql: `
+    -- NHTSA publishes investigations and manufacturer communications as bulk
+    -- flat files only — there is no per-vehicle API for either, verified against
+    -- their own documentation. These tables hold the parsed files. They are pure
+    -- reference data: wipe and re-ingest freely, no user row is affected.
+    CREATE TABLE IF NOT EXISTS ref_investigations (
+      id INTEGER PRIMARY KEY,
+      action_number TEXT, make TEXT, model TEXT, year TEXT,
+      component TEXT, mfr TEXT, opened TEXT, closed TEXT,
+      campaign TEXT, subject TEXT, summary TEXT
+    );
+    CREATE INDEX IF NOT EXISTS ix_inv_lookup ON ref_investigations(make, year, model);
+
+    CREATE TABLE IF NOT EXISTS ref_communications (
+      id INTEGER PRIMARY KEY,
+      block TEXT, nhtsa_id TEXT, doc_id TEXT, comm_date TEXT, comm_type TEXT,
+      make TEXT, model TEXT, year TEXT, components TEXT, mfr_system TEXT, summary TEXT
+    );
+    CREATE INDEX IF NOT EXISTS ix_mc_lookup ON ref_communications(make, year, model);
+    CREATE INDEX IF NOT EXISTS ix_mc_block ON ref_communications(block);
+
+    CREATE TABLE IF NOT EXISTS ref_ingest (
+      source TEXT PRIMARY KEY,
+      url TEXT, file TEXT, rows INTEGER, bytes INTEGER,
+      at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    `
   }
 ];
 

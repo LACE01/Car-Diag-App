@@ -14,9 +14,13 @@ import {
 import { nhtsa, normalizeVin, clusterComplaints, LIVE } from './nhtsa.js';
 import { geocode, nearbyStores, haversineMiles, BRANDS } from './stores.js';
 import {
-  epaEconomy, economyVsEpa, safetyRatings, investigations, communications,
+  epaEconomy, economyVsEpa, safetyRatings,
   altFuelStations, afdcFuelCodes, weatherContext, weatherRules
 } from './reference.js';
+import {
+  ingestInvestigations, ingestCommunications, investigationsFor, communicationsFor,
+  allIngestStatus, blocksForYears, TSB_BLOCKS
+} from './ingest.js';
 import * as core from './core.js';
 
 export const api = express.Router();
@@ -926,14 +930,53 @@ api.get('/vehicles/:id/safety', requireAuth, wrap(async (req, res) => {
   res.json(await safetyRatings(v));
 }));
 
+/* Investigations and manufacturer communications are served from the
+   ingested bulk files — NHTSA has no per-vehicle API for either. */
 api.get('/vehicles/:id/investigations', requireAuth, wrap(async (req, res) => {
   const v = assertVehicle(req.user.id, +req.params.id);
-  res.json(await investigations(v));
+  res.json(investigationsFor(v));
 }));
 
 api.get('/vehicles/:id/communications', requireAuth, wrap(async (req, res) => {
   const v = assertVehicle(req.user.id, +req.params.id);
-  res.json(await communications(v));
+  res.json(communicationsFor(v));
+}));
+
+/* ---------- bulk dataset ingest ---------- */
+api.get('/ingest', requireAuth, wrap(async (req, res) => {
+  const years = db.prepare(`SELECT DISTINCT v.year FROM vehicles v
+    JOIN memberships m ON m.garage_id=v.garage_id AND m.user_id=?
+    WHERE v.year IS NOT NULL`).all(req.user.id).map(r => r.year);
+  res.json({
+    status: allIngestStatus(),
+    blocks: TSB_BLOCKS,
+    suggested: blocksForYears(years),
+    vehicleYears: years,
+    note: 'Investigations is a single 4 MB file covering every investigation since 1972. Manufacturer communications are split into five-year blocks by date received; only the blocks that can cover your vehicles are suggested. Re-run whenever you want fresher data — these tables are pure reference and are wiped and rebuilt, never merged into your records.'
+  });
+}));
+
+let ingesting = false;
+api.post('/ingest/:source', requireAuth, wrap(async (req, res) => {
+  if (ingesting) throw httpErr(409, 'An ingest is already running.');
+  const source = req.params.source;
+  ingesting = true;
+  try {
+    let out;
+    if (source === 'investigations') out = await ingestInvestigations();
+    else if (source === 'communications') {
+      let blocks = req.body?.blocks;
+      if (!blocks?.length) {
+        const years = db.prepare(`SELECT DISTINCT v.year FROM vehicles v
+          JOIN memberships m ON m.garage_id=v.garage_id AND m.user_id=?
+          WHERE v.year IS NOT NULL`).all(req.user.id).map(r => r.year);
+        blocks = blocksForYears(years);
+      }
+      out = await ingestCommunications(blocks);
+    } else throw httpErr(404, 'Unknown source. Use investigations or communications.');
+    audit(req.user.id, null, 'ingest', out);
+    res.json(out);
+  } finally { ingesting = false; }
 }));
 
 api.get('/vehicles/:id/stations', requireAuth, wrap(async (req, res) => {
@@ -964,9 +1007,9 @@ async function attentionFor(v, userId) {
   const d = vehicleDetail(v);
   const u = db.prepare('SELECT home_lat, home_lon FROM users WHERE id=?').get(userId);
 
-  const [inv, comms, epa, wx] = await Promise.all([
-    investigations(v).catch(() => ({ available: false })),
-    communications(v).catch(() => ({ available: false })),
+  const inv = (() => { try { return investigationsFor(v); } catch { return { available: false }; } })();
+  const comms = (() => { try { return communicationsFor(v); } catch { return { available: false }; } })();
+  const [epa, wx] = await Promise.all([
     epaEconomy(v).catch(() => ({ available: false })),
     u?.home_lat != null ? weatherContext({ lat: u.home_lat, lon: u.home_lon }).catch(() => ({ available: false }))
       : Promise.resolve({ available: false })

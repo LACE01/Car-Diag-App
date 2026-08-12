@@ -498,6 +498,18 @@ function renderVehicle() {
     /* ---- what needs attention ---- */
     '<h3 class="sec-h">What needs attention</h3>' + attentionHtml() +
 
+    /* ---- bulk datasets need a one-time pull ---- */
+    ((ctx.investigations?.needsIngest || ctx.communications?.needsIngest)
+      ? '<h3 class="sec-h">Federal investigations &amp; manufacturer bulletins</h3><div class="card">' +
+      '<p class="note" style="margin:0 0 14px">NHTSA publishes recalls, complaints and crash ratings as APIs — those are already live above. <b>Investigations and manufacturer communications are download-only</b>; there is no per-vehicle endpoint for either. Pull the files once and Garage answers from your own database afterwards, which also means it still works in a garage with no signal.</p>' +
+      '<div class="row wrap" style="gap:10px">' +
+      (ctx.investigations?.needsIngest
+        ? '<button class="btn sm" onclick="runIngest(\'investigations\')">Pull investigations (4 MB)</button>' : '') +
+      (ctx.communications?.needsIngest
+        ? '<button class="btn sm ghost" onclick="runIngest(\'communications\')">Pull bulletins for my vehicle years (~30 MB per 5-year block)</button>' : '') +
+      '</div><p class="note" style="margin:12px 0 0">One request to NHTSA instead of thousands. These land in reference tables that can be wiped and rebuilt without touching a single one of your records.</p></div>'
+      : '') +
+
     /* ---- federal investigations ---- */
     (ctx.investigations?.available
       ? '<h3 class="sec-h">Federal investigations <span class="src">NHTSA</span></h3><div class="card">' +
@@ -515,7 +527,18 @@ function renderVehicle() {
     /* ---- manufacturer communications ---- */
     (ctx.communications?.available
       ? '<h3 class="sec-h">Manufacturer communications <span class="chip grey">' + ctx.communications.total + '</span>' +
-      '<span class="src">NHTSA</span></h3><div class="card">' +
+      '<span class="src">NHTSA bulk dataset</span></h3><div class="card">' +
+      ((ctx.communications.warrantyExtensions || []).length
+        ? '<div class="safety" style="background:#DEF5EA;border-color:var(--ok);color:#0F5A38;margin-bottom:14px">' +
+        '<b>Warranty extensions — read these</b>' +
+        ctx.communications.warrantyExtensions.slice(0, 3).map(w =>
+          esc(w.number || '') + ' · ' + esc(String(w.subject || '').slice(0, 180))).join('<br>') +
+        '<br>A warranty extension is the manufacturer quietly agreeing to cover a known failure past the normal term. Unlike an ordinary bulletin, this one can genuinely mean the repair is free.</div>'
+        : '') +
+      ((ctx.communications.byType || []).length
+        ? '<div class="row wrap" style="gap:7px;margin-bottom:14px">' +
+        ctx.communications.byType.map(t => '<span class="chip grey">' + esc(t.type) + ' · ' + t.count + '</span>').join('') + '</div>'
+        : '') +
       (ctx.communications.byComponent.slice(0, 8).map(c =>
         '<div class="rowitem"><div class="ico mono">' + c.count + '</div><div class="txt"><b>' + esc(c.component) + '</b>' +
         '<span>bulletins on file' + (c.latest ? ' · latest ' + esc(String(c.latest).slice(0, 10)) : '') + '</span></div></div>').join('') || '<p class="note" style="margin:0">None on file.</p>') +
@@ -580,6 +603,16 @@ function renderVehicle() {
         '<span>' + esc(c.component.split(' — ')[1] || 'complaints filed with NHTSA for this year, make and model') + '</span></div></div>').join('')
       : '<p class="note" style="margin:0">No complaint data returned for this vehicle yet. Hit "Refresh NHTSA data" above.</p>') +
     '<p class="note" style="margin:14px 0 0">Complaints are unverified owner reports, clustered here by component and mileage band. Volume tells you where to look, not what is wrong with your specific car.</p></div>';
+}
+
+async function runIngest(source) {
+  toast('Downloading from NHTSA — this can take a minute…');
+  try {
+    const r = await API.post('/ingest/' + source, {});
+    const n = r.rows ?? (r.blocks || []).reduce((s, b) => s + b.rows, 0);
+    toast(source + ': ' + num(n) + ' records ingested', 'ok');
+    await loadVehicleExtras(true);
+  } catch (e) { toast(e.message, 'bad'); }
 }
 
 function stars(n) {
