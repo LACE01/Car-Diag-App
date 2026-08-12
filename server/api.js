@@ -196,7 +196,7 @@ api.patch('/vehicles/:id', requireAuth, wrap(async (req, res) => {
   const v = assertVehicle(req.user.id, +req.params.id, true);
   const d = pick(req.body || {}, ['nickname', 'plate', 'plate_state', 'duty', 'mileage', 'vin',
     'purchase_date', 'purchase_price', 'purchase_odometer', 'seller', 'estimated_value',
-    'year', 'make', 'model', 'trim', 'engine', 'icon', 'archived']);
+    'year', 'make', 'model', 'trim', 'engine', 'icon', 'archived', 'epa_id']);
   if (d.duty && !['normal', 'severe'].includes(d.duty)) throw httpErr(400, 'duty must be normal or severe');
   d.updated_at = new Date().toISOString();
   const out = update('vehicles', v.id, d);
@@ -919,7 +919,7 @@ api.get('/ref/irs-rate/:year', requireAuth, (req, res) => res.json({ year: +req.
    ============================================================ */
 api.get('/vehicles/:id/epa', requireAuth, wrap(async (req, res) => {
   const v = assertVehicle(req.user.id, +req.params.id);
-  const epa = await epaEconomy(v);
+  const epa = await epaEconomy(v, req.query.epaId || null);
   const fuel = db.prepare('SELECT * FROM fuel_logs WHERE vehicle_id=? ORDER BY odometer').all(v.id);
   const economy = core.computeEconomy(fuel, !!v.is_ev);
   res.json({ epa, economy, compare: economyVsEpa(economy.average, epa) });

@@ -524,6 +524,9 @@ const MIGRATIONS = [
     CREATE INDEX IF NOT EXISTS ix_mc_lookup ON ref_communications(make, year, model);
     CREATE INDEX IF NOT EXISTS ix_mc_block ON ref_communications(block);
 
+    -- which EPA variant the owner confirmed, when the VIN is not enough
+    ALTER TABLE vehicles ADD COLUMN epa_id TEXT;
+
     CREATE TABLE IF NOT EXISTS ref_ingest (
       source TEXT PRIMARY KEY,
       url TEXT, file TEXT, rows INTEGER, bytes INTEGER,

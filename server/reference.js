@@ -102,8 +102,9 @@ async function cached(key, ttl, loader) {
 /* ============================================================
    EPA fuel economy
    ============================================================ */
-export async function epaEconomy({ year, make, model, trim, engine, drive }) {
-  const key = `epa:${year}:${make}:${model}:${trim || ''}`.toLowerCase();
+export async function epaEconomy({ year, make, model, trim, engine, drive, epa_id }, forceId = null) {
+  forceId = forceId || epa_id || null;
+  const key = `epa:${year}:${make}:${model}:${engine || ''}:${drive || ''}:${forceId || ''}`.toLowerCase();
   return cached(key, TTL.epa, async () => {
     const base = 'https://www.fueleconomy.gov/ws/rest/vehicle';
 
@@ -119,33 +120,43 @@ export async function epaEconomy({ year, make, model, trim, engine, drive }) {
     let epaModels = bestMatches(models, model, { all: true });
     if (!epaModels.length) throw new Error(`EPA lists no model matching "${model}" under ${epaMake.label} ${year}`);
 
-    // 3. Prefer the drivetrain we know about — EPA encodes 2WD/4WD in the name
-    if (drive) {
-      const d = /4|AWD|ALL/i.test(drive) ? '4WD' : '2WD';
-      const better = epaModels.filter(m => m.label.toUpperCase().includes(d));
-      if (better.length) epaModels = better;
-    }
-    const epaModel = epaModels[0];
-
-    // 4. Engine/transmission variants under that model
-    const options = arr((await getJson(
-      `${base}/menu/options?year=${year}&make=${encodeURIComponent(epaMake.value)}&model=${encodeURIComponent(epaModel.value)}`))?.menuItem);
-    if (!options.length) throw new Error(`EPA has no variants for ${epaMake.label} ${epaModel.label} ${year}`);
-
-    // 5. Match the engine if we know it — the option text carries "6 cyl, 3.5 L"
-    let chosen = options[0];
+    // 3. Search EVERY matching model, not just the best-named one.
+    //    EPA splits by drivetrain AND by flex-fuel capability, so a 2015
+    //    F-150 5.0 V8 lives under "F150 Pickup 4WD FFV" while the
+    //    EcoBoosts live under "F150 Pickup 4WD". Picking the closest
+    //    model name alone silently returns the wrong engine's MPG.
     const displ = String(engine || '').match(/(\d\.\d)\s*L/i)?.[1];
-    const cyl = String(engine || '').match(/[IV](\d+)/i)?.[1];
-    const scoreOpt = o => {
-      const t = String(o.text || '');
+    const cyl = String(engine || '').match(/[IV](\d+)/i)?.[1] ||
+      (String(engine || '').match(/(\d+)\s*cyl/i)?.[1]);
+    const wantDrive = drive ? (/4|AWD|ALL/i.test(drive) ? '4WD' : '2WD') : null;
+
+    const all = [];
+    for (const m of epaModels.slice(0, 8)) {
+      const opts = arr((await getJson(
+        `${base}/menu/options?year=${year}&make=${encodeURIComponent(epaMake.value)}&model=${encodeURIComponent(m.value)}`))?.menuItem);
+      for (const o of opts) all.push({ model: m, option: o, label: `${m.label} — ${o.text}` });
+    }
+    if (!all.length) throw new Error(`EPA has no variants for ${epaMake.label} ${model} ${year}`);
+
+    // Engine is the strongest signal: displacement then cylinder count.
+    // Drivetrain is a tie-breaker, never a filter that hides the right engine.
+    const score = c => {
+      const t = String(c.option.text || ''), m = String(c.model.label || '').toUpperCase();
       let s = 0;
-      if (displ && t.includes(displ)) s += 10;
-      if (cyl && new RegExp(`\\b${cyl} cyl`).test(t)) s += 6;
-      if (trim && t.toLowerCase().includes(String(trim).toLowerCase())) s += 3;
+      if (displ && t.includes(displ + ' L')) s += 40;
+      if (cyl && new RegExp(`\\b${cyl} cyl`).test(t)) s += 25;
+      if (wantDrive && m.includes(wantDrive)) s += 10;
+      if (trim && t.toLowerCase().includes(String(trim).toLowerCase())) s += 4;
       return s;
     };
-    const ranked = options.map(o => ({ o, s: scoreOpt(o) })).sort((a, b) => b.s - a.s);
-    if (ranked[0].s > 0) chosen = ranked[0].o;
+    const ranked = all.map(c => ({ c, s: score(c) })).sort((a, b) => b.s - a.s);
+    const best = ranked[0];
+
+    // 40 = displacement matched. Below that we are guessing, and guessing
+    // silently is how you end up comparing a 5.0 V8 against a 2.7 EcoBoost.
+    const confident = best.s >= 40;
+    const chosen = (forceId ? all.find(c => String(c.option.value) === String(forceId))?.option : null) || best.c.option;
+    const chosenWrap = forceId ? (all.find(c => String(c.option.value) === String(forceId)) || best.c) : best.c;
 
     const v = await getJson(`${base}/${chosen.value}`);
     const n = x => (x == null || x === '' ? null : Number(x));
@@ -154,8 +165,13 @@ export async function epaEconomy({ year, make, model, trim, engine, drive }) {
     return {
       available: true,
       epaId: chosen.value,
-      variant: chosen.text,
-      variants: options.map(o => ({ id: o.value, label: o.text })),
+      variant: chosenWrap.label,
+      matched: forceId ? 'chosen by you' : confident ? 'engine matched' : 'BEST GUESS',
+      confident: !!forceId || confident,
+      matchNote: (forceId || confident)
+        ? null
+        : `Your VIN decodes as ${engine || 'an unknown engine'}, and nothing in EPA's list for this vehicle matches that displacement. The figures below are the closest entry, not a confirmed match — pick the right variant below before trusting them.`,
+      variants: all.map(c => ({ id: c.option.value, label: c.label })),
       fuelType: v.fuelType || v.fuelType1 || null,
       vehicleClass: v.VClass || null,
       isEV,

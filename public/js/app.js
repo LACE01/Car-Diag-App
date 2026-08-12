@@ -499,28 +499,54 @@ function renderVehicle() {
     '<h3 class="sec-h">What needs attention</h3>' + attentionHtml() +
 
     /* ---- bulk datasets need a one-time pull ---- */
-    ((ctx.investigations?.needsIngest || ctx.communications?.needsIngest)
-      ? '<h3 class="sec-h">Federal investigations &amp; manufacturer bulletins</h3><div class="card">' +
-      '<p class="note" style="margin:0 0 14px">NHTSA publishes recalls, complaints and crash ratings as APIs — those are already live above. <b>Investigations and manufacturer communications are download-only</b>; there is no per-vehicle endpoint for either. Pull the files once and Garage answers from your own database afterwards, which also means it still works in a garage with no signal.</p>' +
-      '<div class="row wrap" style="gap:10px">' +
-      (ctx.investigations?.needsIngest
-        ? '<button class="btn sm" onclick="runIngest(\'investigations\')">Pull investigations (4 MB)</button>' : '') +
-      (ctx.communications?.needsIngest
-        ? '<button class="btn sm ghost" onclick="runIngest(\'communications\')">Pull bulletins for my vehicle years (~30 MB per 5-year block)</button>' : '') +
-      '</div><p class="note" style="margin:12px 0 0">One request to NHTSA instead of thousands. These land in reference tables that can be wiped and rebuilt without touching a single one of your records.</p></div>'
-      : '') +
+    '<h3 class="sec-h">NHTSA bulk datasets</h3><div class="card">' +
+    '<div class="grid g2" style="gap:14px;margin-bottom:14px">' +
+    [['investigations', 'Investigations', ctx.investigations, 'a single 4 MB file, every investigation since 1972'],
+    ['communications', 'Manufacturer bulletins', ctx.communications, 'five-year blocks, only the ones covering your vehicle years']]
+      .map(([src, label, obj, sub]) => {
+        const done = obj && !obj.needsIngest;
+        return '<div style="border:1.5px solid ' + (done ? 'var(--ok)' : 'var(--line)') + ';border-radius:16px;padding:14px">' +
+          '<div class="between" style="margin-bottom:6px"><b style="font-weight:600">' + label + '</b>' +
+          '<span class="chip ' + (done ? 'ok' : 'grey') + '">' + (done ? 'LOADED' : 'NOT PULLED') + '</span></div>' +
+          '<div class="note" style="margin-bottom:10px">' + (done
+            ? (obj.total != null ? '<b>' + num(obj.total) + '</b> entries match this vehicle' : 'ready') +
+            (obj.ingestedAt ? ' · pulled ' + esc(String(obj.ingestedAt).slice(0, 10)) : '')
+            : sub) + '</div>' +
+          '<button class="btn xs ' + (done ? 'ghost' : '') + '" onclick="runIngest(\'' + src + '\')">' +
+          (done ? 'Refresh' : 'Pull now') + '</button></div>';
+      }).join('') + '</div>' +
+    '<p class="note" style="margin:0">NHTSA serves recalls, complaints and crash ratings as APIs — those are live above with no setup. <b>Investigations and manufacturer communications are download-only</b>, so Garage pulls the published flat files once and answers from your own database afterwards. One request to NHTSA instead of thousands, and it keeps working with no signal.</p></div>' +
 
     /* ---- federal investigations ---- */
     (ctx.investigations?.available
-      ? '<h3 class="sec-h">Federal investigations <span class="src">NHTSA</span></h3><div class="card">' +
+      ? '<h3 class="sec-h" id="sec-investigations">Federal investigations ' +
+      '<span class="chip ' + (ctx.investigations.open.length ? 'bad' : 'grey') + '">' +
+      ctx.investigations.open.length + ' open</span>' +
+      '<span class="chip grey">' + ctx.investigations.closed.length + ' closed</span>' +
+      '<span class="src">NHTSA bulk dataset' + (ctx.investigations.ingestedAt ? ' · ' + esc(String(ctx.investigations.ingestedAt).slice(0, 10)) : '') + '</span></h3><div class="card">' +
       (ctx.investigations.open.length
-        ? ctx.investigations.open.map(i => '<div class="rowitem"><div class="ico" style="background:#FBE1E1;color:#C33A3A">' + ic('alert', 20) + '</div>' +
-          '<div class="txt"><b class="mono" style="font-size:13px">' + esc(i.number || 'Investigation') + '</b>' +
-          '<span>' + esc([i.component, i.summary].filter(Boolean).join(' — ')).slice(0, 260) + '</span>' +
-          '<span>Opened ' + esc(i.openDate || '—') + '</span></div>' +
-          '<span class="chip bad">OPEN</span></div>').join('')
-        : '<p class="note" style="margin:0">No open investigations on this vehicle line.' +
-        (ctx.investigations.closed.length ? ' ' + ctx.investigations.closed.length + ' closed on record.' : '') + '</p>') +
+        ? ctx.investigations.open.map(i => '<div style="padding:14px 0;border-bottom:1px solid var(--line)">' +
+          '<div class="row" style="gap:14px;align-items:flex-start">' +
+          '<div class="ico" style="background:#FBE1E1;color:#C33A3A">' + ic('alert', 20) + '</div>' +
+          '<div style="flex:1;min-width:0"><div class="between wrap">' +
+          '<b class="mono" style="font-size:13px">' + esc(i.number || 'Investigation') + '</b>' +
+          '<span class="chip bad">OPEN</span></div>' +
+          '<div style="font-weight:600;margin-top:3px">' + esc(i.summary || '') + '</div>' +
+          '<div class="note">' + esc(i.component || '') + ' · opened ' + esc(i.openDate || '—') + '</div>' +
+          (i.detail ? '<div class="note" style="margin-top:6px">' + esc(String(i.detail).slice(0, 600)) + '</div>' : '') +
+          '</div></div></div>').join('')
+        : '<p class="note" style="margin:0 0 12px">No <b>open</b> investigation on this vehicle line right now.</p>') +
+
+      (ctx.investigations.closed.length
+        ? '<div style="margin-top:14px"><span class="mlabel">Closed investigations — the history of what NHTSA has already looked at</span>' +
+        ctx.investigations.closed.slice(0, 12).map(i =>
+          '<div class="kv"><span style="flex:1;text-align:left">' +
+          '<b class="mono" style="font-size:11.5px;color:var(--ink)">' + esc(i.number || '') + '</b> ' +
+          esc(String(i.summary || i.component || '').slice(0, 90)) +
+          (i.campaign ? ' <span class="chip bad" style="font-size:9px">→ recall ' + esc(i.campaign) + '</span>' : '') +
+          '</span><b style="font-size:12px">' + esc(i.openDate || '') + ' → ' + esc(i.closeDate || '') + '</b></div>').join('') +
+        '<p class="note" style="margin:10px 0 0">Where an investigation produced a recall, the campaign number is shown — that is the chain from "NHTSA noticed a pattern" to "the manufacturer had to fix it".</p></div>'
+        : '') +
       '<p class="note" style="margin:14px 0 0">' + esc(ctx.investigations.caveat) + '</p></div>'
       : '') +
 
@@ -606,12 +632,30 @@ function renderVehicle() {
 }
 
 async function runIngest(source) {
-  toast('Downloading from NHTSA — this can take a minute…');
+  toast('Downloading from NHTSA — a few MB, this can take a minute…');
   try {
     const r = await API.post('/ingest/' + source, {});
     const n = r.rows ?? (r.blocks || []).reduce((s, b) => s + b.rows, 0);
-    toast(source + ': ' + num(n) + ' records ingested', 'ok');
     await loadVehicleExtras(true);
+
+    // say what it actually found for THIS vehicle, not just that it downloaded
+    const ctx = VH.attention?.context || {};
+    const obj = source === 'investigations' ? ctx.investigations : ctx.communications;
+    const mine = source === 'investigations'
+      ? (obj?.available ? `${obj.open.length} open and ${obj.closed.length} closed on your ${vLabel(activeVehicle())}` : 'nothing matched this vehicle')
+      : (obj?.available ? `${obj.total} bulletins on your ${vLabel(activeVehicle())}` : 'nothing matched this vehicle');
+
+    openModal(modalHead('Pulled ' + num(n) + ' records',
+      'Downloaded from NHTSA and parsed into your own database. It answers instantly from here on, with or without a network.') +
+      '<div class="card" style="box-shadow:none;border:1.5px solid var(--ok);margin-bottom:16px">' +
+      '<b style="font-weight:600">' + esc(mine) + '</b></div>' +
+      (source === 'investigations' && obj?.open?.length
+        ? '<span class="mlabel">Open right now</span>' + obj.open.map(i =>
+          '<div class="bullet"><span class="n mono" style="width:auto;padding:0 5px">' + esc(i.number || '') + '</span>' +
+          '<div><b style="font-weight:600">' + esc(i.summary || '') + '</b><div class="note">' + esc(i.component || '') +
+          ' · opened ' + esc(i.openDate || '') + '</div></div></div>').join('')
+        : '') +
+      '<button class="btn block" style="margin-top:18px" onclick="closeModal();document.getElementById(\'sec-investigations\')?.scrollIntoView({behavior:\'smooth\'})">Show me</button>');
   } catch (e) { toast(e.message, 'bad'); }
 }
 

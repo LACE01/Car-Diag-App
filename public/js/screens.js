@@ -169,11 +169,25 @@ function epaHtml() {
       '. fueleconomy.gov covers 1984 onward for US-market vehicles; heavy-duty trucks over 8,500 lb GVWR were never rated.</p></div>';
   }
   const p = e.epa, c = e.compare;
+  const v = activeVehicle();
   return '<div class="card">' +
+    (p.confident ? '' :
+      '<div class="safety" style="margin-bottom:14px"><b>This may be the wrong engine</b>' + esc(p.matchNote || '') + '</div>') +
     '<div class="between wrap" style="margin-bottom:14px"><div>' +
     '<b style="font-weight:600;font-size:15px">' + esc(p.variant) + '</b>' +
     '<div class="note">' + esc([p.vehicleClass, p.transmission, p.drive].filter(Boolean).join(' · ')) + '</div></div>' +
-    '<span class="src">EPA · fueleconomy.gov</span></div>' +
+    '<div class="row" style="gap:8px">' +
+    '<span class="chip ' + (p.confident ? 'ok' : 'bad') + '">' + esc(p.matched || '') + '</span>' +
+    '<span class="src">EPA · fueleconomy.gov</span></div></div>' +
+    ((p.variants || []).length > 1
+      ? '<div style="margin-bottom:14px"><span class="mlabel">Your VIN decodes as ' + esc(v?.engine || 'unknown') + ' — is this the right EPA entry?</span>' +
+      '<div class="row wrap" style="gap:10px">' +
+      '<select class="inp" id="epa-pick" style="flex:1;min-width:240px">' +
+      p.variants.map(x => '<option value="' + esc(x.id) + '"' + (String(x.id) === String(p.epaId) ? ' selected' : '') + '>' +
+        esc(x.label) + '</option>').join('') + '</select>' +
+      '<button class="btn sm" onclick="pickEpaVariant()">Use this one</button></div>' +
+      '<p class="note" style="margin:8px 0 0">EPA splits a model by drivetrain <i>and</i> by flex-fuel capability, so on a 2015 F-150 the 5.0 V8 sits under "F150 Pickup 4WD FFV" while the EcoBoosts sit under "F150 Pickup 4WD". Your choice is remembered.</p></div>'
+      : '') +
     '<div class="grid g4" style="gap:14px;margin-bottom:14px">' +
     ['City', 'Highway', 'Combined', 'Annual fuel cost'].map((lab, i) => {
       const val = [p.city, p.highway, p.combined, p.annualFuelCost != null ? money(p.annualFuelCost, 0) : null][i];
@@ -190,6 +204,18 @@ function epaHtml() {
     (p.co2GramsPerMile ? '<div class="kv" style="margin-top:12px"><span>Tailpipe CO₂</span><b class="mono">' + num(p.co2GramsPerMile) + ' g/mi</b></div>' : '') +
     (p.rangeElectric ? '<div class="kv"><span>EPA range</span><b class="mono">' + num(p.rangeElectric) + ' mi</b></div>' : '') +
     '<p class="note" style="margin:12px 0 0">' + esc(p.note) + '</p></div>';
+}
+
+async function pickEpaVariant() {
+  const id = val('epa-pick');
+  if (!id) return;
+  try {
+    await API.patch('/vehicles/' + state.activeId, { epa_id: id });
+    EPA.data = await API.get('/vehicles/' + state.activeId + '/epa?epaId=' + encodeURIComponent(id));
+    await refreshDetail();
+    renderMoney();
+    toast('EPA baseline set to ' + (EPA.data.epa?.variant || 'the chosen variant'), 'ok');
+  } catch (e) { toast(e.message, 'bad'); }
 }
 
 function renderMoney() {
