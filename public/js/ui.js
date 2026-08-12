@@ -116,11 +116,13 @@ function openModal(html, wide) {
   const box = document.getElementById('mbox');
   box.className = 'mbox' + (wide ? ' wide' : '');
   box.innerHTML = html;
-  document.body.classList.add('modal');
+  // `modal-open`, not `modal` — see the note in app.css. A body flag must never
+  // share a name with an element class.
+  document.body.classList.add('modal-open');
   const first = box.querySelector('input:not([type=hidden]),select,textarea');
   if (first && !('ontouchstart' in window)) setTimeout(() => first.focus(), 60);
 }
-function closeModal() { document.body.classList.remove('modal'); }
+function closeModal() { document.body.classList.remove('modal-open'); }
 function modalHead(title, sub) {
   return '<div class="between" style="margin-bottom:' + (sub ? '2px' : '18px') + '">' +
     '<h3 style="font-size:20px">' + esc(title) + '</h3>' +

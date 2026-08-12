@@ -184,10 +184,27 @@ async function req(method, path, body, form) {
   const html = await fetch(BASE + '/');
   const text = await html.text();
   ok('app shell served', html.status === 200 && /GARAGE/.test(text), html.status);
+
+  const assets = {};
   for (const f of ['/css/app.css', '/js/app.js', '/js/diagrams.js', '/js/obd.js', '/js/screens.js', '/js/diagnose.js', '/js/kb.js', '/js/icons.js', '/js/ui.js']) {
     const res = await fetch(BASE + f);
     ok('asset ' + f, res.status === 200, res.status);
+    assets[f] = await res.text();
   }
+
+  /* ---- regression guard: body state flags must not collide with element classes.
+     `.modal` sets display:none. A body carrying that class disappears and takes
+     the entire application with it — a blank white page with a fully populated
+     DOM. This check is cheap and the failure mode is not obvious, so it stays. */
+  const css = assets['/css/app.css'];
+  const js = Object.entries(assets).filter(([k]) => k.endsWith('.js')).map(([, v]) => v).join('\n');
+  const bodyFlags = new Set(
+    [...js.matchAll(/body\.classList\.(?:add|remove|toggle)\('([a-z0-9-]+)'/g)].map(m => m[1])
+  );
+  const collisions = [...bodyFlags].filter(f => new RegExp(`(^|[},])\\.${f}\\s*[{,:.]`, 'm').test(css));
+  ok('no body state flag collides with an element class', collisions.length === 0,
+    collisions.length ? { collisions, hint: 'rename the body flag, e.g. "modal" -> "modal-open"' } : null);
+  ok('body flags were actually discovered (guard is live)', bodyFlags.size >= 4, [...bodyFlags]);
 
   console.log(`\n${pass} passed, ${fail} failed\n`);
   process.exit(fail ? 1 : 0);
