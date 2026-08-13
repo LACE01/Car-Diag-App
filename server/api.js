@@ -550,6 +550,83 @@ api.post('/reminders/:rid/done', requireAuth, wrap(async (req, res) => {
   res.json({ reminder: core.reminderStatus(db.prepare('SELECT * FROM reminders WHERE id=?').get(r.id), v), record });
 }));
 
+/* ---------- task detail: checklist, specs, notes per step ---------- */
+api.get('/reminders/:rid/detail', requireAuth, wrap(async (req, res) => {
+  const r = ownedRow(req.user.id, 'reminders', +req.params.rid, false);
+  const v = db.prepare('SELECT * FROM vehicles WHERE id=?').get(r.vehicle_id);
+  let items = db.prepare('SELECT * FROM reminder_checklist WHERE reminder_id=? ORDER BY seq, id').all(r.id);
+  const template = core.checklistFor(r.name);
+
+  res.json({
+    task: core.reminderStatus(r, v),
+    checklist: items,
+    hasTemplate: !!template,
+    template: template ? { fluid: template.fluid, capacity: template.capacity, torqueNote: template.torqueNote, count: template.items.length } : null,
+    torque_specs: safeJson(r.torque_specs) || [],
+    history: db.prepare('SELECT * FROM service_records WHERE vehicle_id=? AND what LIKE ? ORDER BY date DESC LIMIT 8')
+      .all(r.vehicle_id, '%' + String(r.name).split(/[&/(]/)[0].trim() + '%'),
+    vehicle: v
+  });
+}));
+
+/** Seed the checklist from the built-in template for this job. */
+api.post('/reminders/:rid/checklist/generate', requireAuth, wrap(async (req, res) => {
+  const r = ownedRow(req.user.id, 'reminders', +req.params.rid);
+  const t = core.checklistFor(r.name);
+  if (!t) throw httpErr(404, 'No built-in checklist for "' + r.name + '". Add your own steps instead.');
+  const existing = db.prepare('SELECT COUNT(*) c FROM reminder_checklist WHERE reminder_id=?').get(r.id).c;
+  if (existing && !req.body?.replace) throw httpErr(409, 'This task already has a checklist. Pass replace:true to rebuild it.');
+  if (req.body?.replace) db.prepare('DELETE FROM reminder_checklist WHERE reminder_id=?').run(r.id);
+
+  const ins = db.prepare('INSERT INTO reminder_checklist (reminder_id,seq,text,detail,torque,part) VALUES (?,?,?,?,?,?)');
+  t.items.forEach((i, n) => ins.run(r.id, n + 1, i.text, i.detail || null, i.torque || null, i.part || null));
+  const d = {};
+  if (t.fluid && !r.fluid_spec) d.fluid_spec = t.fluid;
+  if (t.capacity && !r.capacity) d.capacity = t.capacity;
+  if (Object.keys(d).length) update('reminders', r.id, d);
+
+  res.status(201).json({
+    checklist: db.prepare('SELECT * FROM reminder_checklist WHERE reminder_id=? ORDER BY seq').all(r.id),
+    note: t.torqueNote || null
+  });
+}));
+
+api.post('/reminders/:rid/checklist', requireAuth, wrap(async (req, res) => {
+  const r = ownedRow(req.user.id, 'reminders', +req.params.rid);
+  const d = pick(req.body || {}, ['text', 'detail', 'torque', 'part', 'note']);
+  if (!d.text) throw httpErr(400, 'A step needs text.');
+  d.reminder_id = r.id;
+  d.seq = (db.prepare('SELECT COALESCE(MAX(seq),0) m FROM reminder_checklist WHERE reminder_id=?').get(r.id).m) + 1;
+  res.status(201).json({ item: insert('reminder_checklist', d) });
+}));
+
+api.patch('/checklist/:cid', requireAuth, wrap(async (req, res) => {
+  const item = db.prepare('SELECT * FROM reminder_checklist WHERE id=?').get(+req.params.cid);
+  if (!item) throw httpErr(404, 'Step not found.');
+  ownedRow(req.user.id, 'reminders', item.reminder_id);
+  const d = pick(req.body || {}, ['text', 'detail', 'torque', 'part', 'note', 'done', 'seq']);
+  if (d.done !== undefined) d.done_at = d.done ? new Date().toISOString() : null;
+  res.json({ item: update('reminder_checklist', item.id, d) });
+}));
+
+api.delete('/checklist/:cid', requireAuth, wrap(async (req, res) => {
+  const item = db.prepare('SELECT * FROM reminder_checklist WHERE id=?').get(+req.params.cid);
+  if (!item) throw httpErr(404, 'Step not found.');
+  ownedRow(req.user.id, 'reminders', item.reminder_id);
+  db.prepare('DELETE FROM reminder_checklist WHERE id=?').run(item.id);
+  res.json({ ok: true });
+}));
+
+/** Specs live on the task: fluid, capacity, torque values, part numbers. */
+api.patch('/reminders/:rid/specs', requireAuth, wrap(async (req, res) => {
+  const r = ownedRow(req.user.id, 'reminders', +req.params.rid);
+  const d = pick(req.body || {}, ['fluid_spec', 'capacity', 'part_numbers', 'priority', 'spec_source', 'deferred_until', 'not_applicable']);
+  if (req.body?.torque_specs !== undefined) {
+    d.torque_specs = JSON.stringify(Array.isArray(req.body.torque_specs) ? req.body.torque_specs : []);
+  }
+  res.json({ task: update('reminders', r.id, d) });
+}));
+
 api.delete('/reminders/:rid', requireAuth, wrap(async (req, res) => {
   ownedRow(req.user.id, 'reminders', +req.params.rid);
   db.prepare('DELETE FROM reminders WHERE id=?').run(+req.params.rid);

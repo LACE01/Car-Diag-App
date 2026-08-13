@@ -647,6 +647,38 @@ const MIGRATIONS = [
     );
     CREATE INDEX IF NOT EXISTS ix_tp_user ON torque_patterns(user_id);
     `
+  },
+  {
+    id: '006_task_detail',
+    sql: `
+    -- A scheduled job is more than a due date. These are the fields you
+    -- actually need in your hand while doing it, and they belong on the
+    -- task rather than in a note somewhere else.
+    ALTER TABLE reminders ADD COLUMN fluid_spec TEXT;
+    ALTER TABLE reminders ADD COLUMN capacity TEXT;
+    ALTER TABLE reminders ADD COLUMN torque_specs TEXT;   -- json [{name,value}]
+    ALTER TABLE reminders ADD COLUMN part_numbers TEXT;
+    ALTER TABLE reminders ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal';
+    ALTER TABLE reminders ADD COLUMN spec_source TEXT;
+    ALTER TABLE reminders ADD COLUMN deferred_until TEXT;
+    ALTER TABLE reminders ADD COLUMN not_applicable INTEGER NOT NULL DEFAULT 0;
+
+    -- Per-step checklist, each with its own note, so "did I actually
+    -- reset the oil life monitor" has an answer six months later.
+    CREATE TABLE IF NOT EXISTS reminder_checklist (
+      id INTEGER PRIMARY KEY,
+      reminder_id INTEGER NOT NULL REFERENCES reminders(id) ON DELETE CASCADE,
+      seq INTEGER NOT NULL DEFAULT 0,
+      text TEXT NOT NULL,
+      detail TEXT,
+      torque TEXT,
+      part TEXT,
+      note TEXT,
+      done INTEGER NOT NULL DEFAULT 0,
+      done_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS ix_rck_rem ON reminder_checklist(reminder_id, seq);
+    `
   }
 ];
 

@@ -126,13 +126,14 @@ function renderMaintenance() {
     (rems.length ? rems.map(r =>
       '<div style="margin-bottom:22px;padding-bottom:18px;border-bottom:1px solid var(--line)">' +
       '<div class="between wrap" style="margin-bottom:8px">' +
-      '<div><b style="font-weight:600">' + esc(r.name) + '</b>' +
+      '<div><b style="font-weight:600;cursor:pointer;color:var(--primary)" onclick="openTask(' + r.id + ')">' +
+      esc(r.name) + ' ' + ic('arrow', 12) + '</b>' +
       (r.severe ? ' <span class="chip warn" style="font-size:9px;padding:2px 8px">SEVERE</span>' : '') +
       (/timing belt/i.test(r.name) ? ' <span class="chip bad" style="font-size:9px;padding:2px 8px">INTERFERENCE RISK</span>' : '') +
       '<div class="note" style="margin-top:2px">Every ' + [r.intMiles ? dist(r.intMiles, true) : null, r.intMonths ? r.intMonths + ' mo' : null].filter(Boolean).join(' or ') +
       (r.last_done_date ? ' · last done ' + dateShort(r.last_done_date) + (r.last_done_miles ? ' at ' + dist(r.last_done_miles, true) : '') : '') + '</div></div>' +
       '<div class="row" style="gap:8px"><span class="chip ' + r.cls + ' mono">' + esc(r.due) + '</span>' +
-      '<button class="btn xs ghost" onclick="showTools(\'' + esc(r.name).replace(/'/g, "\\'") + '\',\'' + esc(r.system || '') + '\')">Tools</button>' +
+      '<button class="btn xs" onclick="openTask(' + r.id + ')">Open</button>' +
       '<button class="btn xs ghost" onclick="markDone(' + r.id + ')">Mark done</button></div></div>' +
       '<div class="bar"><i class="' + (r.cls === 'grey' ? '' : r.cls) + '" style="width:' + r.pct + '%"></i></div>' +
       '<p class="note" style="margin:7px 0 0">' + esc(r.note || '') + (r.driver ? ' <b>Driven by the ' + (r.driver === 'time' ? 'time' : 'mileage') + ' interval.</b>' : '') + '</p>' +
@@ -154,6 +155,171 @@ function renderMaintenance() {
     ['Differential', '75W-90 GL-5 · limited-slip needs the friction modifier']]
       .map(x => '<div class="kv"><span style="flex:0 0 34%;text-align:left">' + x[0] + '</span><b style="font-weight:500;max-width:64%;text-align:right">' + x[1] + '</b></div>').join('') +
     '<p class="note" style="margin:14px 0 0">Sample values. Per-VIN capacities and specifications come from a licensed repair-data provider in production.</p></div>';
+}
+
+/* ============================================================
+   TASK DETAIL — open a scheduled job and actually work from it
+   ============================================================ */
+let TASK = null;
+
+async function openTask(id) {
+  try {
+    TASK = await API.get('/reminders/' + id + '/detail');
+    drawTask();
+  } catch (e) { toast(e.message, 'bad'); }
+}
+
+function drawTask() {
+  const t = TASK.task, list = TASK.checklist, done = list.filter(i => i.done).length;
+  const tools = toolsForJob(t.name, t.system);
+
+  openModal(
+    '<div class="between" style="margin-bottom:4px"><div style="min-width:0">' +
+    '<span class="mlabel" style="margin:0">' + esc(String(t.system || 'task').toUpperCase()) +
+    ' <span class="sep">//</span> ' + (t.overdue ? 'OVERDUE' : t.cls === 'warn' ? 'DUE SOON' : 'NOT DUE') + '</span>' +
+    '<h3 style="font-size:20px">' + esc(t.name) + '</h3></div>' +
+    '<button onclick="closeModal()" style="font-size:24px;color:var(--muted)">&times;</button></div>' +
+    '<p class="note" style="margin:0 0 14px">Every ' +
+    [t.intMiles ? dist(t.intMiles, true) : null, t.intMonths ? t.intMonths + ' mo' : null,
+    t.interval_hours ? t.interval_hours + ' hr' : null].filter(Boolean).join(' or ') +
+    (t.severe ? ' · severe-duty schedule' : '') +
+    ' <span class="sep">//</span> <span class="chip ' + t.cls + '">' + esc(t.due) + '</span></p>' +
+
+    /* ---- specs ---- */
+    '<div class="grid g2" style="gap:12px;margin-bottom:14px">' +
+    '<div class="card tight"><span class="mlabel mute">Fluid / spec</span>' +
+    '<div class="note" style="color:var(--ink)">' + esc(t.fluid_spec || 'Not recorded') + '</div></div>' +
+    '<div class="card tight"><span class="mlabel mute">Capacity</span>' +
+    '<div class="note" style="color:var(--ink)">' + esc(t.capacity || 'Not recorded') + '</div></div>' +
+    '</div>' +
+
+    /* ---- torque ---- */
+    '<div class="card tight" style="margin-bottom:14px">' +
+    '<div class="between" style="margin-bottom:8px"><span class="mlabel mute" style="margin:0">Torque specs</span>' +
+    '<button class="btn xs ghost" onclick="editTaskSpecs()">Edit specs</button></div>' +
+    (TASK.torque_specs.length
+      ? TASK.torque_specs.map(s => '<div class="kv"><span style="flex:1;text-align:left">' + esc(s.name) + '</span>' +
+        '<b class="mono">' + esc(s.value) + '</b></div>').join('')
+      : '<p class="note" style="margin:0">None recorded yet. Add them from a source you hold — Garage will not invent a torque value.</p>') +
+    (t.spec_source ? '<div class="note" style="margin-top:8px">Source: ' + esc(t.spec_source) + '</div>' : '') +
+    '</div>' +
+
+    /* ---- checklist ---- */
+    '<div class="between" style="margin:16px 0 10px">' +
+    '<span class="mlabel" style="margin:0">Checklist <span class="sep">//</span> ' +
+    String(done).padStart(2, '0') + ' OF ' + String(list.length).padStart(2, '0') + '</span>' +
+    '<div class="row" style="gap:6px">' +
+    (TASK.hasTemplate
+      ? '<button class="btn xs ghost" onclick="genChecklist(' + (list.length ? 'true' : 'false') + ')">' +
+      (list.length ? 'Rebuild from template' : 'Use the ' + TASK.template.count + '-step template') + '</button>'
+      : '') +
+    '<button class="btn xs ghost" onclick="addChecklistStep()">+ Step</button></div></div>' +
+
+    (list.length ? '<div class="bar" style="margin-bottom:12px"><i class="' + (done === list.length ? 'ok' : '') +
+      '" style="width:' + Math.round((done / list.length) * 100) + '%"></i></div>' : '') +
+
+    (list.length
+      ? list.map(i => checklistRow(i)).join('')
+      : '<div class="empty"><div class="empty-in"><h4>NO CHECKLIST YET</h4>' +
+      '<p class="note" style="margin:0">' + (TASK.hasTemplate
+        ? 'There is a built-in ' + TASK.template.count + '-step checklist for this job, including the steps people actually forget.'
+        : 'Add your own steps. Each one gets its own note field.') + '</p></div></div>') +
+
+    (tools.length ? '<div style="margin-top:16px">' + toolsPanel(t.name, t.system, { flat: true }) + '</div>' : '') +
+
+    (TASK.history.length
+      ? '<div style="margin-top:16px"><span class="mlabel">Last done</span>' +
+      TASK.history.slice(0, 4).map(h => '<div class="kv"><span style="flex:1;text-align:left">' + dateShort(h.date) +
+        (h.miles ? ' · ' + num(h.miles) + ' mi' : '') + '</span><b class="mono">' + money(h.cost) + '</b></div>').join('') + '</div>'
+      : '') +
+
+    '<div class="row wrap" style="gap:8px;margin-top:18px">' +
+    '<button class="btn" style="flex:1" onclick="closeModal();markDone(' + t.id + ')">Mark done</button>' +
+    '<button class="btn ghost" onclick="closeModal();showTools(\'' + esc(t.name).replace(/'/g, "\\'") + '\',\'' + esc(t.system || '') + '\')">Tools</button>' +
+    '</div>', true);
+}
+
+function checklistRow(i) {
+  return '<div class="rowitem" style="align-items:flex-start">' +
+    '<button class="ico ' + (i.done ? 'ok' : '') + '" style="cursor:pointer" onclick="toggleStep(' + i.id + ',' + (i.done ? 0 : 1) + ')" ' +
+    'title="' + (i.done ? 'Done' : 'Mark done') + '">' + ic(i.done ? 'check' : 'plus', 17) + '</button>' +
+    '<div class="txt">' +
+    '<b style="' + (i.done ? 'opacity:.6;text-decoration:line-through' : '') + '">' + esc(i.text) + '</b>' +
+    (i.detail ? '<span>' + esc(i.detail) + '</span>' : '') +
+    (i.torque ? '<span class="mono" style="color:var(--primary)">TORQUE // ' + esc(i.torque) + '</span>' : '') +
+    (i.part ? '<span class="mono" style="color:var(--warn)">PART // ' + esc(i.part) + '</span>' : '') +
+    '<input class="inp" style="margin-top:7px;padding:7px 11px;font-size:12.5px" value="' + esc(i.note || '') + '" ' +
+    'placeholder="Note for this step — what you found, what you used, what to do differently" ' +
+    'onchange="stepNote(' + i.id + ',this.value)">' +
+    '</div>' +
+    '<button class="btn xs ghost" onclick="delStep2(' + i.id + ')">×</button></div>';
+}
+
+async function genChecklist(replace) {
+  try {
+    const r = await API.post('/reminders/' + TASK.task.id + '/checklist/generate', { replace: !!replace });
+    await openTask(TASK.task.id);
+    toast(r.note || 'Checklist ready', 'ok');
+  } catch (e) { toast(e.message, 'bad'); }
+}
+async function toggleStep(id, done) {
+  await API.patch('/checklist/' + id, { done });
+  await openTask(TASK.task.id);
+}
+async function stepNote(id, note) {
+  await API.patch('/checklist/' + id, { note });
+  const i = TASK.checklist.find(x => x.id === id); if (i) i.note = note;
+  toast('Note saved', 'ok');
+}
+async function delStep2(id) {
+  await API.del('/checklist/' + id);
+  await openTask(TASK.task.id);
+}
+function addChecklistStep() {
+  openModal(modalHead('Add a step') +
+    fld('What to do', inp('cs-text')) + '<div style="height:12px"></div>' +
+    fld('Detail', inp('cs-detail', { ph: 'Why, or what to watch for' })) + '<div style="height:12px"></div>' +
+    '<div class="grid g2" style="gap:12px">' +
+    fld('Torque', inp('cs-torque', { mono: true, ph: '25 lb-ft (34 N·m)' })) +
+    fld('Part', inp('cs-part', { ph: 'Crush washer' })) + '</div>' +
+    '<div style="height:16px"></div><button class="btn block" onclick="saveChecklistStep()">Add</button>');
+}
+async function saveChecklistStep() {
+  if (!val('cs-text')) return toast('Describe the step', 'bad');
+  await API.post('/reminders/' + TASK.task.id + '/checklist', {
+    text: val('cs-text'), detail: val('cs-detail'), torque: val('cs-torque'), part: val('cs-part')
+  });
+  await openTask(TASK.task.id);
+}
+function editTaskSpecs() {
+  const t = TASK.task;
+  const rows = TASK.torque_specs.length ? TASK.torque_specs : [{ name: '', value: '' }, { name: '', value: '' }];
+  openModal(modalHead('Specs for ' + t.name,
+    'Fill these from a manual you hold. Garage records the source alongside the number so you still trust it in three years.') +
+    fld('Fluid / specification', inp('ts-fluid', { value: t.fluid_spec || '' })) + '<div style="height:12px"></div>' +
+    fld('Capacity', inp('ts-cap', { value: t.capacity || '', ph: '13.0 qt (12.3 L) with filter' })) + '<div style="height:12px"></div>' +
+    fld('Part numbers', inp('ts-parts', { value: t.part_numbers || '', mono: true })) + '<div style="height:14px"></div>' +
+    '<span class="mlabel">Torque values</span><div id="ts-rows">' +
+    rows.map((r, i) => '<div class="grid g2" style="gap:10px;margin-bottom:8px">' +
+      inp('ts-n' + i, { value: r.name, ph: 'Drain plug' }) + inp('ts-v' + i, { value: r.value, mono: true, ph: '25 lb-ft (34 N·m)' }) + '</div>').join('') +
+    '<div class="grid g2" style="gap:10px;margin-bottom:8px">' +
+    inp('ts-n' + rows.length, { ph: 'Another fastener' }) + inp('ts-v' + rows.length, { mono: true, ph: 'value' }) + '</div></div>' +
+    '<div style="height:12px"></div>' +
+    fld('Where these came from', sel('ts-src', ['', 'Mitchell1 DIY', 'ALLDATAdiy', 'ChiltonLibrary', 'EBSCO Auto Repair Source', 'Factory service manual', 'OEM service portal', 'Own measurement'], t.spec_source || '')) +
+    '<div style="height:16px"></div><button class="btn block" onclick="saveTaskSpecs(' + (rows.length + 1) + ')">Save specs</button>');
+}
+async function saveTaskSpecs(n) {
+  const specs = [];
+  for (let i = 0; i < n; i++) {
+    const name = val('ts-n' + i), value = val('ts-v' + i);
+    if (name && value) specs.push({ name, value });
+  }
+  await API.patch('/reminders/' + TASK.task.id + '/specs', {
+    fluid_spec: val('ts-fluid'), capacity: val('ts-cap'), part_numbers: val('ts-parts'),
+    spec_source: val('ts-src'), torque_specs: specs
+  });
+  await openTask(TASK.task.id);
+  toast('Specs saved', 'ok');
 }
 
 function logHours() {

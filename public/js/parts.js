@@ -20,7 +20,7 @@ const PARTS = {
   saved: [],
   home: null,
   nearby: null,
-  radius: 25,
+  radius: 40,
   prices: null,
   busy: false
 };
@@ -100,7 +100,9 @@ function myStoresHtml() {
     return '<div class="card empty"><div style="color:var(--primary);opacity:.4;margin-bottom:10px">' + ic('pin', 40) + '</div>' +
       '<b style="display:block;color:var(--ink);margin-bottom:6px">No stores saved yet</b>' +
       '<p class="note" style="max-width:460px;margin:0 auto 16px">Find the AutoZone, O\'Reilly and NAPA nearest you and pin them here. Then every part search gives you a one-tap link into that chain\'s catalogue, their phone number, and directions.</p>' +
-      '<button class="btn sm" onclick="findStores()">Find stores near me</button></div>';
+      '<div class="row wrap" style="gap:8px;justify-content:center">' +
+      '<button class="btn sm" onclick="findStores()">FIND STORES NEAR ME</button>' +
+      '<button class="btn sm ghost" onclick="addStoreManually()">ADD ONE MANUALLY</button></div></div>';
   }
   return '<div class="grid g2">' + PARTS.saved.map(s => storeCard(s, true)).join('') + '</div>';
 }
@@ -152,6 +154,10 @@ async function findStores() {
     fld('ZIP code, or city and state', inp('geo-q', { ph: '78660  ·  or  Pflugerville, TX', value: PARTS.home?.home_label || '' })) +
     '<div style="height:14px"></div>' +
     fld('Search radius', sel('geo-r', [[10, '10 miles'], [25, '25 miles'], [40, '40 miles'], [60, '60 miles']], PARTS.radius)) +
+    '<div style="height:14px"></div>' +
+    '<div class="card tight"><span class="mlabel mute" style="margin:0 0 6px">Store missing?</span>' +
+    '<p class="note" style="margin:0 0 10px">OpenStreetMap is volunteer-mapped, so a store can simply not be in it yet — that is why your Rifle AutoZone does not appear. Add it by hand and it behaves exactly like a found one.</p>' +
+    '<button class="btn xs ghost" onclick="addStoreManually()">Add a store manually</button></div>' +
     '<div style="height:18px"></div>' +
     '<button class="btn block" onclick="searchByZip()">Find stores</button>' +
     '<p class="note" style="margin:14px 0 0">Store data © OpenStreetMap contributors, ODbL. Hours and phone numbers are community-maintained, so call before you drive across town.</p>');
@@ -217,7 +223,8 @@ function nearbyHtml() {
     '<button class="btn xs ghost" onclick="PARTS.nearby=null;renderParts()">Hide</button></h3>' +
     (list.length
       ? '<div class="grid g2">' + list.map(s => storeCard(s, false)).join('') + '</div>'
-      : '<div class="card"><p class="note" style="margin:0">Everything nearby is already in My stores.</p></div>') +
+      : '<div class="card"><p class="note" style="margin:0 0 10px">Everything OpenStreetMap knows about nearby is already in My stores.</p>' +
+      '<button class="btn xs ghost" onclick="addStoreManually()">Add one it has not mapped</button></div>') +
     '<p class="note" style="margin-top:12px">' + esc(n.attribution) + '</p>';
 }
 
@@ -232,6 +239,52 @@ async function saveStore(json) {
     await loadPartsData(true);
     renderParts();
     toast(s.brand_label + ' saved', 'ok');
+  } catch (e) { toast(e.message, 'bad'); }
+}
+
+/* OSM coverage is volunteer-contributed and genuinely patchy outside
+   metro areas. Rather than pretend the map is complete, let the owner
+   enter the store — it then works identically to a found one. */
+function addStoreManually() {
+  openModal(modalHead('Add a store',
+    'For anything OpenStreetMap has not mapped yet. Everything except the coordinates is optional, and even those can be filled by geocoding the address.') +
+    '<div class="grid g2" style="gap:14px">' +
+    fld('Chain', sel('ms-brand', [['autozone', 'AutoZone'], ['oreilly', "O'Reilly"], ['napa', 'NAPA'],
+    ['advance', 'Advance Auto Parts'], ['carquest', 'Carquest'], ['other', 'Other / independent']], 'autozone')) +
+    fld('Name', inp('ms-name', { ph: 'AutoZone Rifle' })) + '</div>' +
+    '<div style="height:14px"></div>' +
+    fld('Address', inp('ms-addr', { ph: '1000 Airport Rd, Rifle, CO 81650' })) +
+    '<div style="height:14px"></div><div class="grid g2" style="gap:14px">' +
+    fld('Phone', inp('ms-phone', { mono: true })) +
+    fld('Hours', inp('ms-hours', { ph: 'Mo-Sa 07:30-21:00; Su 09:00-19:00' })) + '</div>' +
+    '<div style="height:14px"></div>' +
+    fld('Commercial account number', inp('ms-acct', { mono: true, ph: 'if you have one' })) +
+    '<p class="note" style="margin:12px 0 16px">Garage will geocode the address to place it on the map and work out the distance. If geocoding fails you can still save it — you just will not get a distance.</p>' +
+    '<button class="btn block" onclick="saveManualStore()">Add store</button>');
+}
+
+async function saveManualStore() {
+  const brand = val('ms-brand');
+  const label = { autozone: 'AutoZone', oreilly: "O'Reilly", napa: 'NAPA', advance: 'Advance Auto Parts', carquest: 'Carquest', other: 'Parts store' }[brand];
+  const addr = val('ms-addr').trim();
+  let lat = null, lon = null;
+  if (addr) {
+    try {
+      const g = await API.get('/geocode?q=' + encodeURIComponent(addr));
+      lat = g.lat; lon = g.lon;
+    } catch { toast('Could not geocode that address — saving without a distance', 'bad'); }
+  }
+  try {
+    await API.post('/stores', {
+      brand, name: val('ms-name') || label, address: addr || null,
+      phone: val('ms-phone') || null, hours: val('ms-hours') || null,
+      commercial_account: val('ms-acct') || null,
+      lat, lon, osm_type: 'manual', osm_id: 'm' + Date.now()
+    });
+    closeModal();
+    await loadPartsData(true);
+    renderParts();
+    toast(label + ' added', 'ok');
   } catch (e) { toast(e.message, 'bad'); }
 }
 

@@ -76,7 +76,7 @@ function unzipFirstEntry(buf) {
   const data = buf.subarray(start, start + f.compSize);
 
   if (f.method === 0) return { name: f.name, buf: data };
-  if (f.method === 8) return { name: f.name, buf: zlib.inflateRawSync(data, { maxOutputLength: 1024 * 1024 * 1024 }) };
+  if (f.method === 8) return { name: f.name, buf: zlib.inflateRawSync(data, { maxOutputLength: 2 * 1024 * 1024 * 1024 }) };
   throw new Error(`Unsupported ZIP compression method ${f.method}`);
 }
 
@@ -86,16 +86,40 @@ async function download(url) {
   return Buffer.from(await r.arrayBuffer());
 }
 
-/** Tab-delimited, one record per line, no quoting in these files. */
-function* rows(text) {
+/**
+ * Tab-delimited, one record per line.
+ *
+ * Iterates the BUFFER, never the whole file as one string. The 2015–2019
+ * bulletin file is 31 MB zipped and expands past V8's maximum string
+ * length (0x1fffffe8, about 512 MB), so `buf.toString()` throws
+ * "Cannot create a string longer than 0x1fffffe8 characters" — which is
+ * exactly what it did. Decoding a window at a time has no such ceiling
+ * and uses a fraction of the memory.
+ */
+const NL = 0x0a;
+function* rows(buf) {
+  const WINDOW = 4 << 20;               // 4 MB of file per decode
   let start = 0;
-  while (start < text.length) {
-    let end = text.indexOf('\n', start);
-    if (end === -1) end = text.length;
-    const line = text.slice(start, end).replace(/\r$/, '');
-    start = end + 1;
-    if (!line.trim()) continue;
-    yield line.split('\t');
+  while (start < buf.length) {
+    let end = Math.min(start + WINDOW, buf.length);
+    // never split a record: walk back to the last newline in the window
+    if (end < buf.length) {
+      let cut = end;
+      while (cut > start && buf[cut - 1] !== NL) cut--;
+      if (cut > start) end = cut;       // if a single line exceeds the window, take it whole
+      else { let e = end; while (e < buf.length && buf[e] !== NL) e++; end = Math.min(e + 1, buf.length); }
+    }
+    const chunk = buf.toString('latin1', start, end);
+    start = end;
+    let p = 0;
+    while (p < chunk.length) {
+      let nl = chunk.indexOf('\n', p);
+      if (nl === -1) nl = chunk.length;
+      const line = chunk.slice(p, nl);
+      p = nl + 1;
+      if (!line || !line.trim()) continue;
+      yield line.replace(/\r$/, '').split('\t');
+    }
   }
 }
 
@@ -108,7 +132,6 @@ export async function ingestInvestigations() {
   const url = BASE_INV + 'FLAT_INV.zip';
   const zip = await download(url);
   const { buf, name } = unzipFirstEntry(zip);
-  const text = buf.toString('latin1');
 
   db.exec('BEGIN');
   try {
@@ -117,7 +140,7 @@ export async function ingestInvestigations() {
       (action_number, make, model, year, component, mfr, opened, closed, campaign, subject, summary)
       VALUES (?,?,?,?,?,?,?,?,?,?,?)`);
     let n = 0;
-    for (const f of rows(text)) {
+    for (const f of rows(buf)) {
       if (f.length < 10) continue;
       ins.run(f[0], norm(f[1]), norm(f[2]), f[3], f[4], f[5], f[6], f[7], f[8], f[9], (f[10] || '').slice(0, 2000));
       n++;
@@ -162,7 +185,6 @@ export async function ingestCommunications(blocks) {
     const url = `${BASE_TSB}TSBS_RECEIVED_${block}.zip`;
     const zip = await download(url);
     const { buf, name } = unzipFirstEntry(zip);
-    const text = buf.toString('latin1');
 
     db.exec('BEGIN');
     try {
@@ -171,7 +193,7 @@ export async function ingestCommunications(blocks) {
         (block, nhtsa_id, doc_id, comm_date, comm_type, make, model, year, components, mfr_system, summary)
         VALUES (?,?,?,?,?,?,?,?,?,?,?)`);
       let n = 0;
-      for (const f of rows(text)) {
+      for (const f of rows(buf)) {
         // 14-field layout (May 2024 revision):
         // 1 NHTSA ID | 2 replacement | 3 date added | 4 TSB/Doc ID | 5 mfr comm date
         // 6 internal campaign | 7 comm type | 8 make | 9 model | 10 model year

@@ -188,7 +188,7 @@ async function req(method, path, body, form) {
   const assets = {};
   for (const f of ['/css/app.css', '/js/app.js', '/js/diagrams.js', '/js/obd.js', '/js/screens.js',
     '/js/diagnose.js', '/js/kb.js', '/js/icons.js', '/js/ui.js', '/js/parts.js', '/js/services.js',
-    '/js/tools.js', '/js/torque.js', '/js/procedures.js']) {
+    '/js/tools.js', '/js/torque.js', '/js/procedures.js', '/js/vehicle-art.js']) {
     const res = await fetch(BASE + f);
     ok('asset ' + f, res.status === 200, res.status);
     assets[f] = await res.text();
@@ -379,6 +379,54 @@ async function req(method, path, body, form) {
 
   ok('torque generator ships to the client', /function circularOrder/.test(assets['/js/torque.js'] || ''));
   ok('player and hotspot editor ship', /function playProcedure/.test(assets['/js/procedures.js'] || '') && /bindHotspotStage/.test(assets['/js/procedures.js'] || ''));
+
+  /* ---- task detail: checklist, notes, specs ---- */
+  r = await req('GET', `/api/vehicles/${vid}/reminders`);
+  const oilTask = r.body.reminders.find(x => /Engine oil/.test(x.name));
+  r = await req('POST', `/api/reminders/${oilTask.id}/checklist/generate`, {});
+  ok('oil change seeds a real checklist', r.status === 201 && r.body.checklist.length >= 12, r.body.checklist?.length);
+  ok('the double-gasket step is in there', r.body.checklist.some(c => /gasket came off/i.test(c.text)));
+  ok('the oil-life reset step is in there', r.body.checklist.some(c => /oil life monitor/i.test(c.text)));
+  const step = r.body.checklist[0];
+
+  r = await req('POST', `/api/reminders/${oilTask.id}/checklist/generate`, {});
+  ok('generating twice is refused without replace', r.status === 409, r.status);
+
+  r = await req('PATCH', `/api/checklist/${step.id}`, { done: 1, note: 'Used the Fumoto valve' });
+  ok('per-step note and tick save', r.body.item.note === 'Used the Fumoto valve' && r.body.item.done === 1, r.body.item);
+  ok('ticking a step timestamps it', !!r.body.item.done_at);
+
+  r = await req('PATCH', `/api/reminders/${oilTask.id}/specs`, {
+    fluid_spec: '15W-40 CJ-4', capacity: '13.0 qt', spec_source: 'Factory service manual',
+    torque_specs: [{ name: 'Drain plug', value: '25 lb-ft (34 N·m)' }]
+  });
+  ok('task specs save', r.body.task.fluid_spec === '15W-40 CJ-4', r.body.task);
+
+  r = await req('GET', `/api/reminders/${oilTask.id}/detail`);
+  ok('task detail returns checklist, specs and history',
+    r.body.checklist.length >= 12 && r.body.torque_specs[0].name === 'Drain plug' && Array.isArray(r.body.history), {
+    steps: r.body.checklist?.length, torque: r.body.torque_specs
+  });
+  ok('task detail carries the spec source', r.body.task.spec_source === 'Factory service manual');
+
+  r = await req('POST', `/api/reminders/${oilTask.id}/checklist`, { text: 'Check the skid plate bolts', torque: '18 lb-ft' });
+  ok('custom step appends after the template', r.status === 201 && r.body.item.seq > 12, r.body.item?.seq);
+
+  /* ---- manual store, for what OpenStreetMap has not mapped ---- */
+  r = await req('POST', '/api/stores', {
+    brand: 'autozone', name: 'AutoZone Rifle', address: '1000 Airport Rd, Rifle, CO 81650',
+    osm_type: 'manual', osm_id: 'm' + Date.now(), lat: 39.5347, lon: -107.7831
+  });
+  ok('a manually added store saves like a found one', r.status === 201 && r.body.store.brand === 'autozone', r.body);
+
+  /* ---- client bundles ---- */
+  ok('vehicle art ships and is real line art',
+    /VEHICLE_ART/.test(assets['/js/vehicle-art.js'] || '') && /_wheel/.test(assets['/js/vehicle-art.js'] || ''));
+  ok('art covers pickup, suv, sedan, van and ev',
+    ['v_pickup', 'v_suv', 'v_sedan', 'v_van', 'v_ev'].every(k => (assets['/js/vehicle-art.js'] || '').includes(k + ':')));
+  ok('alerts drill down rather than only jumping', /function openAlert/.test(assets['/js/app.js'] || ''));
+  ok('tasks open into a checklist', /function openTask/.test(assets['/js/screens.js'] || ''));
+  ok('stores can be added by hand', /function addStoreManually/.test(assets['/js/parts.js'] || ''));
 
   console.log(`\n${pass} passed, ${fail} failed\n`);
   process.exit(fail ? 1 : 0);

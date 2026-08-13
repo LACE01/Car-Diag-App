@@ -130,7 +130,7 @@ window.rerender = () => { if (renderers[state.screen]) renderers[state.screen]()
 
 function needVehicle(el, what) {
   el.innerHTML = '<div class="card empty">' +
-    '<div class="ghost-art">' + ic('v_pickup', 150, 'stroke-width=".7"') + '</div>' +
+    '<div class="ghost-art">' + vart('v_pickup', 320, 'stroke-width=".9"') + '</div>' +
     '<div class="empty-in"><h4>NO VEHICLE SELECTED</h4>' +
     '<p class="note" style="max-width:380px;margin:0 auto 18px">Add a vehicle to ' + what + '.</p>' +
     '<button class="btn sm" onclick="openAdd()">+ ADD VEHICLE</button></div></div>';
@@ -212,7 +212,7 @@ function renderVehicleIdentity() {
 
   host.innerHTML =
     '<div class="vid-top">' +
-    '<span class="vid-icon">' + ic(v.icon || 'v_pickup', 26) + '</span>' +
+    '<span class="vid-icon">' + vart(artFor(v), 54, 'stroke-width="1.8"') + '</span>' +
     '<div style="min-width:0"><div class="vid-name">' + esc(v.nickname || vLabel(v)) + '</div>' +
     '<div class="vid-sub">' + esc(v.trim || v.engine || 'VEHICLE') + '</div></div></div>' +
     '<div class="vid-rows">' +
@@ -385,7 +385,7 @@ function renderGarage() {
       : od ? '<span class="chip warn"><span class="dot"></span>' + od + ' overdue</span>'
         : '<span class="chip ok"><span class="dot"></span>All clear</span>';
     return '<div class="veh"><div class="hero" onclick="setActive(' + v.id + ').then(()=>go(\'vehicle\'))">' +
-      ic(v.icon, 70, 'stroke-width="1.2"') + '<div style="position:absolute;top:12px;right:12px">' + badge + '</div>' +
+      vart(artFor(v), 128, 'stroke-width="1.3"') + '<div style="position:absolute;top:12px;right:12px">' + badge + '</div>' +
       '<button class="x" onclick="removeVehicle(' + v.id + ',event)" title="Remove">&times;</button></div>' +
       '<div class="body"><h3 onclick="setActive(' + v.id + ').then(()=>go(\'vehicle\'))">' + esc(v.nickname || vLabel(v)) + '</h3>' +
       '<div class="sub">' + (esc([v.trim, v.engine, String(v.drive || '').split('/')[0]].filter(Boolean).join(' · ')) || 'Decode a VIN for full specs') +
@@ -422,8 +422,74 @@ function renderAlerts() {
       return '<div class="rowitem"><div class="ico" style="background:' + c[0] + ';color:' + c[1] + '">' + ic(icons[x.kind] || 'alert', 20) + '</div>' +
         '<div class="txt"><b>' + esc(x.title) + '</b><span>' + esc(x.body || '') + (x.action ? ' — ' + esc(x.action) : '') + '</span>' +
         '<span style="font-size:11px;opacity:.75">' + esc(x.vehicle) + '</span></div>' +
-        '<button class="btn xs ghost" onclick="jumpToAlert(' + x.vehicle_id + ',\'' + x.kind + '\')">Open</button></div>';
+        '<button class="btn xs ghost" onclick=\'openAlert(' + JSON.stringify(JSON.stringify(x)) + ')\'>Open</button></div>';
     }).join('') + '</div>';
+}
+
+/* ============================================================
+   ALERT DRILL-DOWN
+   Every notification opens the thing behind it, with its source,
+   its confidence, and the actions that actually apply to that kind.
+   ============================================================ */
+const ALERT_DEST = {
+  recall: 'vehicle', investigation: 'vehicle', tsb: 'vehicle', complaints: 'vehicle',
+  maintenance: 'maintenance', warranty: 'ownership', document: 'ownership',
+  tires: 'wear', battery: 'wear', brakes: 'wear', dtc: 'diagnose',
+  odometer: 'records', economy: 'money', weather: 'vehicle'
+};
+
+async function openAlert(json) {
+  const x = typeof json === 'string' ? JSON.parse(json) : json;
+  if (x.vehicle_id && x.vehicle_id !== state.activeId) await setActive(x.vehicle_id);
+
+  const st = { critical: 'bad', high: 'bad', medium: 'warn', info: 'grey', bad: 'bad', warn: 'warn', ok: 'ok' };
+  const actions = [];
+
+  if (x.kind === 'recall' && x.ref?.id) {
+    actions.push(['Recall status &amp; evidence', 'recallStatus(' + x.ref.id + ')']);
+    actions.push(['Read the campaign', 'showRecall(' + x.ref.id + ')']);
+  }
+  if (x.kind === 'maintenance' && x.ref?.id) {
+    actions.push(['Open the job', 'closeModal();openTask(' + x.ref.id + ')']);
+    actions.push(['Mark done', 'closeModal();markDone(' + x.ref.id + ')']);
+  }
+  if (x.kind === 'dtc') actions.push(['Open Diagnose', "closeModal();go('diagnose')"]);
+  if (x.kind === 'tires') actions.push(['Log tread depths', "closeModal();go('wear')"]);
+  if (x.kind === 'battery') actions.push(['Log a battery test', "closeModal();go('wear');setTimeout(addBattery,200)"]);
+  if (x.kind === 'brakes') actions.push(['Log a brake inspection', "closeModal();go('wear');setTimeout(addBrakeMeasurement,200)"]);
+  if (x.kind === 'economy') actions.push(['Open Fuel &amp; money', "closeModal();go('money')"]);
+  if (x.kind === 'document' || x.kind === 'warranty') actions.push(['Open Ownership', "closeModal();go('ownership')"]);
+  if (x.kind === 'investigation' && x.ref?.id) {
+    actions.push(['Look it up at NHTSA', "window.open('https://www.nhtsa.gov/recalls','_blank')"]);
+  }
+  const dest = ALERT_DEST[x.kind];
+  if (dest) actions.push(['Go to ' + TITLES[dest], "closeModal();go('" + dest + "')"]);
+
+  openModal(
+    '<div class="between" style="margin-bottom:4px"><div style="min-width:0">' +
+    '<span class="mlabel" style="margin:0">' + esc(String(x.kind).toUpperCase()) +
+    ' <span class="sep">//</span> ' + esc(String(x.level).toUpperCase()) + '</span>' +
+    '<h3 style="font-size:20px">' + esc(x.title) + '</h3></div>' +
+    '<button onclick="closeModal()" style="font-size:24px;color:var(--muted)">&times;</button></div>' +
+    (x.vehicle ? '<p class="note" style="margin:0 0 14px">' + esc(x.vehicle) + '</p>' : '') +
+
+    '<div class="card tight" style="border-left:3px solid var(--' + (st[x.level] === 'bad' ? 'bad' : st[x.level] === 'warn' ? 'warn' : 'primary') + ');margin-bottom:14px">' +
+    '<div style="font-size:14.5px;color:var(--ink)">' + esc(x.body || '') + '</div>' +
+    (x.action ? '<div class="note" style="margin-top:8px">' + esc(x.action) + '</div>' : '') + '</div>' +
+
+    (x.why ? '<span class="mlabel">Why this matters</span><p class="note" style="margin:0 0 14px">' + esc(x.why) + '</p>' : '') +
+
+    '<div class="grid g2" style="gap:12px;margin-bottom:16px">' +
+    '<div class="card tight"><span class="mlabel mute">Source</span>' +
+    '<div class="note" style="color:var(--ink)">' + esc(x.source || 'unknown') + '</div></div>' +
+    '<div class="card tight"><span class="mlabel mute">Confidence</span>' +
+    '<div class="note" style="color:' + (/^LOW/.test(x.confidence || '') ? 'var(--warn)' : 'var(--ink)') + '">' +
+    esc(x.confidence || 'not stated') + '</div></div></div>' +
+
+    (actions.length
+      ? '<span class="mlabel">What you can do</span>' +
+      actions.map(a => '<button class="btn block ghost" style="margin-bottom:8px" onclick="' + a[1] + '">' + a[0] + '</button>').join('')
+      : ''));
 }
 
 async function jumpToAlert(vid, kind) {
@@ -482,7 +548,8 @@ function attentionHtml() {
     '</div><div class="card">' +
     items.map(x => {
       const st = LEVEL_STYLE[x.level] || LEVEL_STYLE.info;
-      return '<div style="padding:14px 0;border-bottom:1px solid var(--line)">' +
+      return '<div style="padding:14px 0;border-bottom:1px solid var(--line);cursor:pointer" ' +
+        'onclick=\'openAlert(' + JSON.stringify(JSON.stringify(x)) + ')\'>' +
         '<div class="row" style="gap:14px;align-items:flex-start">' +
         '<div class="ico ' + st[0] + (x.level === 'critical' ? ' pulse-bad' : '') + '">' + ic(icons[x.kind] || 'alert', 20) + '</div>' +
         '<div style="flex:1;min-width:0">' +
@@ -517,7 +584,7 @@ function renderVehicle() {
   const openDtc = (d.dtcs || []).filter(t => !t.cleared_at);
 
   el.innerHTML =
-    '<div class="stage"><div class="art">' + ic(v.icon, 140, 'stroke-width="1"') +
+    '<div class="stage"><div class="art">' + vart(artFor(v), 300, 'stroke-width="1.1"') +
     (v.vin ? '<span class="chip mono" style="position:absolute;top:16px;left:16px">' + esc(v.vin) + '</span>' : '') +
     '<span class="chip ' + (openR.length ? 'bad' : 'ok') + '" style="position:absolute;top:16px;right:16px"><span class="dot"></span>' +
     (openR.length ? openR.length + ' open recall' + (openR.length > 1 ? 's' : '') : 'No open recalls') + '</span></div>' +

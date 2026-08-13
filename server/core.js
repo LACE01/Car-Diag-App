@@ -138,6 +138,168 @@ export function reminderStatus(rem, vehicle, today = new Date()) {
 
 function fmt(n) { return Math.round(n).toLocaleString('en-US'); }
 
+/* ============================================================
+   TASK CHECKLISTS
+
+   The steps that actually matter on a job, the ones people forget:
+   reset the oil-life monitor, replace the drain plug washer, check
+   the old filter gasket did not stay stuck to the block.
+
+   Torque values here are the ones that are effectively universal
+   (a drain plug washer, a wheel nut range) or are marked as needing
+   YOUR source. Nothing safety-critical is invented — where a value
+   is vehicle-specific the field says so and stays empty until you
+   fill it from a manual you hold.
+   ============================================================ */
+export const TASK_CHECKLISTS = {
+  'Engine oil & filter': {
+    fluid: 'Check the door jamb, cap or manual for viscosity and the API/ILSAC or ACEA spec',
+    capacity: 'Per your manual — do not guess, overfilling aerates the oil and starves the pump',
+    torqueNote: 'Drain plug torque is vehicle-specific and low. An overtightened plug strips an aluminium pan.',
+    items: [
+      { text: 'Park level, engine warm but not hot', detail: 'Warm oil carries more suspended debris out with it. Hot oil burns.' },
+      { text: 'Chock the wheels, lift and support on stands', detail: 'Never under a vehicle on a jack alone.' },
+      { text: 'Position the drain pan, remove the drain plug', detail: 'Loosen with a socket, not pliers. Expect the plug to drop into the pan.' },
+      { text: 'Replace the drain plug crush washer', detail: 'A reused washer is the most common cause of a slow drip afterwards.', part: 'crush washer / gasket' },
+      { text: 'Remove the oil filter', detail: 'Cap-style socket for cartridge filters, band or claw for spin-on.' },
+      { text: 'CHECK the old filter gasket came off with it', detail: 'A double-gasket blows all the oil out in seconds. This is the step that destroys engines.' },
+      { text: 'Lubricate the new filter gasket with clean oil', detail: 'Dry gaskets grab and tear.' },
+      { text: 'Fit the filter — hand tight plus the amount printed on it', detail: 'Usually three-quarters of a turn after contact. Not with a wrench.' },
+      { text: 'Refit the drain plug to torque', torque: 'from your manual', detail: 'Low value. Snug is not a spec.' },
+      { text: 'Fill with the specified quantity, minus about half a quart', detail: 'Leave room to top up after checking — easier than draining an overfill.' },
+      { text: 'Run for 30 seconds, check for leaks at the plug and filter', detail: 'Look before you drop the vehicle back down.' },
+      { text: 'Shut off, wait 5 minutes, check the level and top up', detail: 'Reading it immediately gives you a false low.' },
+      { text: 'Reset the oil life monitor', detail: 'The thing everyone forgets. The next interval is wrong if you skip it.' },
+      { text: 'Record the odometer and the oil used', detail: 'This is what makes the next interval accurate.' }
+    ]
+  },
+  'Tire rotation': {
+    torqueNote: 'Wheel nut torque is vehicle-specific — commonly 100–150 lb-ft on a light truck. Use YOUR figure.',
+    items: [
+      { text: 'Note the rotation pattern for your drivetrain', detail: 'Rearward cross for RWD/4WD, forward cross for FWD, side-to-side for directional tires.' },
+      { text: 'Loosen the nuts while the wheels are on the ground', detail: 'Breaking them loose in the air spins the wheel.' },
+      { text: 'Lift and support on stands at the lift points' },
+      { text: 'Measure and record tread depth on each tire before moving them', detail: 'Do it now or it never happens. This is what turns a rotation into an inspection.' },
+      { text: 'Check each tire for uneven wear, cupping, feathering', detail: 'Inner-edge wear is alignment. Cupping is worn dampers.' },
+      { text: 'Inspect brakes while the wheels are off', detail: 'You are already here. Pad thickness takes ten seconds per corner.' },
+      { text: 'Rotate to the pattern', part: 'anti-seize on the hub face, not the studs' },
+      { text: 'Hand-start every nut', detail: 'Cross-threading a stud with an impact is a wheel-stud job.' },
+      { text: 'Torque in a star pattern, in stages', torque: 'from your manual' },
+      { text: 'Set cold tire pressures to the door placard', detail: 'The placard, not the number on the sidewall — that is the tire maximum.' },
+      { text: 'Re-torque after 50–100 miles', detail: 'Alloy wheels relax as they seat. Put a reminder in your phone.' }
+    ]
+  },
+  'Brake fluid': {
+    fluid: 'DOT 3 / DOT 4 / DOT 5.1 as specified — never DOT 5 silicone in an ABS system',
+    torqueNote: 'Bleeder screws are small and strip easily. Typically around 9 lb-ft.',
+    items: [
+      { text: 'Identify the specified fluid on the reservoir cap', detail: 'Mixing DOT 5 silicone into a conventional system destroys the seals.' },
+      { text: 'Siphon the old fluid out of the reservoir', detail: 'Do not let it run dry once you start bleeding.' },
+      { text: 'Refill with new fluid from a sealed bottle', detail: 'Brake fluid absorbs water from open air. An opened bottle is scrap.' },
+      { text: 'Bleed furthest from the master cylinder first', detail: 'Right rear, left rear, right front, left front on most vehicles.' },
+      { text: 'Keep the reservoir above MIN throughout', detail: 'Let it empty and you start over with air in the ABS unit.' },
+      { text: 'Bleed until clean fluid runs clear of bubbles at each corner' },
+      { text: 'Torque each bleeder', torque: 'from your manual' },
+      { text: 'Check pedal feel before moving the vehicle', detail: 'Firm and high. Spongy means air is still in there — do not drive it.' },
+      { text: 'Test at walking pace before anything else', detail: 'In a safe place, with nothing behind you.' }
+    ]
+  },
+  'Engine air filter': {
+    items: [
+      { text: 'Open the airbox — usually clips or four screws' },
+      { text: 'Note the airflow direction marked on the old filter' },
+      { text: 'Vacuum any debris out of the housing', detail: 'Anything you leave gets drawn straight through the MAF.' },
+      { text: 'Inspect the MAF sensor for oil or dirt', detail: 'Especially if the last filter was an oiled aftermarket one.' },
+      { text: 'Fit the new filter, seated fully in its groove', detail: 'A filter that is not seated lets unfiltered air past the edge.' },
+      { text: 'Close the airbox, check every clip is latched', detail: 'A loose airbox lid causes lean codes and a whistle.' }
+    ]
+  },
+  'Cabin air filter': {
+    items: [
+      { text: 'Locate the filter — usually behind the glovebox' },
+      { text: 'Note the airflow arrow direction' },
+      { text: 'Check the housing for leaves and rodent nesting', detail: 'Common on vehicles parked outside. Worth a look before it becomes a blower motor.' },
+      { text: 'Fit the new filter with the arrow the same way round' },
+      { text: 'Refit the glovebox stops and check the door closes' }
+    ]
+  },
+  'Transmission fluid': {
+    fluid: 'The exact fluid specification — "universal" ATF causes more shudder complaints than any other single thing',
+    torqueNote: 'Pan bolts are low torque and tightened in a spiral from the centre.',
+    items: [
+      { text: 'Confirm the exact fluid specification', detail: 'Not a substitute. Not a "compatible with" claim on the back of a bottle.' },
+      { text: 'Check the fill procedure before you drain', detail: 'Many modern transmissions fill from underneath at a set temperature and have no dipstick.' },
+      { text: 'Drain the pan' },
+      { text: 'Replace the filter and pan gasket', part: 'filter + gasket kit' },
+      { text: 'Clean the magnets in the pan and note what was on them', detail: 'Fine grey paste is normal. Metal chips or bronze are not.' },
+      { text: 'Refit the pan, torque in a spiral from the centre', torque: 'from your manual' },
+      { text: 'Fill to the specified level at the specified fluid temperature', detail: 'Temperature matters — the level is wrong when cold.' },
+      { text: 'Record the quantity that actually went in' }
+    ]
+  },
+  'Spark plugs': {
+    torqueNote: 'Plug torque matters in an aluminium head. Overtightening pulls threads.',
+    items: [
+      { text: 'Work on a cold engine', detail: 'Pulling plugs from a hot aluminium head risks the threads.' },
+      { text: 'Blow debris out of the plug wells before removing anything', detail: 'Whatever is in the well falls into the cylinder otherwise.' },
+      { text: 'Remove one coil and plug at a time', detail: 'Keeps everything in the right cylinder.' },
+      { text: 'Read each old plug and note its condition', detail: 'Colour and wear per cylinder is free diagnostic information. Photograph them.' },
+      { text: 'Check the gap on each new plug', detail: 'Use a wire gauge — feeler blades damage fine-wire iridium electrodes.' },
+      { text: 'Anti-seize only if the manufacturer calls for it', detail: 'Many plated plugs specifically say not to, and it changes the effective torque.' },
+      { text: 'Start every plug by hand', detail: 'Cross-threading a head is a very bad day.' },
+      { text: 'Torque to spec', torque: 'from your manual' },
+      { text: 'Refit coils and connectors, listen for each click' }
+    ]
+  },
+  'Brake inspection': {
+    items: [
+      { text: 'Measure pad thickness at each corner in millimetres', detail: 'Write the numbers down. "Looks fine" is not a record.' },
+      { text: 'Measure rotor thickness at four points', detail: 'An inch in from the edge, with a micrometer.' },
+      { text: 'Compare rotor thickness to the discard figure stamped on the hat' },
+      { text: 'Check inner-to-outer pad difference on each corner', detail: 'More than 2 mm means a seized guide pin, not worn pads.' },
+      { text: 'Inspect flexible hoses for cracking and bulging' },
+      { text: 'Check hard lines for corrosion, especially over the axle' },
+      { text: 'Check the fluid level and colour' },
+      { text: 'Record every number in the app', detail: 'Two measurements a year gives you a wear rate and a real forecast.' }
+    ]
+  },
+  'Coolant': {
+    fluid: 'The specified chemistry — mixing OAT and IAT drops the additives out of suspension',
+    items: [
+      { text: 'NEVER open a hot cooling system', detail: 'It will scald you. Cold only.' },
+      { text: 'Drain at the radiator petcock or lower hose' },
+      { text: 'Note the colour and clarity of what comes out', detail: 'Rust, oil film or a milkshake are all findings worth recording.' },
+      { text: 'Refill with the correct chemistry, pre-mixed 50/50 with distilled water', detail: 'Tap water deposits scale in the heater core.' },
+      { text: 'Bleed air at the bleeder with the heater on full hot' },
+      { text: 'Run to temperature with the front raised and watch the level' },
+      { text: 'Recheck cold the next morning and top up', detail: 'Air works its way out overnight — this is when you actually find the level.' },
+      { text: 'Pressure test to the cap rating if you have the tool', torque: '15 psi held 15 min on most systems' }
+    ]
+  },
+  'State inspection / emissions': {
+    items: [
+      { text: 'Scan for stored and pending codes first', detail: 'A pending code fails you as surely as a lit lamp on many programmes.' },
+      { text: 'Check every readiness monitor is complete', detail: 'Most states allow one or two incomplete. Clearing codes resets them all.' },
+      { text: 'Confirm the MIL illuminates at key-on and goes out', detail: 'A removed bulb is an automatic fail.' },
+      { text: 'Check tires, wipers, lights and horn', detail: 'The safety half of the inspection is where most people actually fail.' },
+      { text: 'Have registration and insurance in the vehicle' },
+      { text: 'Record the result and the due date for next year' }
+    ]
+  }
+};
+
+/** Look up a checklist by task name, tolerating slight naming differences. */
+export function checklistFor(name) {
+  const n = String(name || '').toLowerCase();
+  const exact = Object.keys(TASK_CHECKLISTS).find(k => k.toLowerCase() === n);
+  if (exact) return { key: exact, ...TASK_CHECKLISTS[exact] };
+  const partial = Object.keys(TASK_CHECKLISTS).find(k => {
+    const kk = k.toLowerCase().split(/[&/(]/)[0].trim();
+    return n.includes(kk) || kk.includes(n.split(/[&/(]/)[0].trim());
+  });
+  return partial ? { key: partial, ...TASK_CHECKLISTS[partial] } : null;
+}
+
 /* ---------- warranty ---------- */
 export function warrantyStatus(w, vehicle, today = new Date()) {
   const startMiles = w.start_miles || 0;

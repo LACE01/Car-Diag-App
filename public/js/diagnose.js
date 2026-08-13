@@ -22,7 +22,7 @@ function renderDiagnose() {
     (connected
       ? '<div class="scanbay" style="margin-bottom:16px">' +
       (liveTimer || PLAY_SCAN ? '<div class="scanline"></div>' : '') +
-      ic(v.icon || 'v_pickup', 132, 'stroke-width=".8"') +
+      vart(artFor(v), 300, 'stroke-width="1"') +
       '<div style="position:absolute;left:16px;top:14px" class="mono">' +
       '<span class="chip ok"><span class="dot"></span>DIAG // READY</span></div>' +
       '<div style="position:absolute;right:16px;bottom:14px" class="note mono">' +
