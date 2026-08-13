@@ -439,10 +439,10 @@ function drawPlayer() {
     (s.body ? '<p class="pl-text">' + esc(s.body) + '</p>' : '') +
 
     (s.torque_value
-      ? '<div class="card" style="background:var(--ink);color:#fff;margin:16px 0">' +
-      '<span class="mlabel" style="color:#B9B6D6">Torque</span>' +
-      '<div class="mono" style="font-size:26px;font-weight:700">' + esc(s.torque_value) + '</div>' +
-      (p.source ? '<div class="note" style="color:#8B8AA5;margin-top:4px">Source: ' + esc(p.source) + (p.source_ref ? ' · ' + esc(p.source_ref) : '') + '</div>' : '') +
+      ? '<div class="card" style="background:var(--elevated);border-color:var(--primary);margin:16px 0">' +
+      '<span class="mlabel">Torque</span>' +
+      '<div class="mono" style="font-size:26px;font-weight:700;color:var(--primary)">' + esc(s.torque_value) + '</div>' +
+      (p.source ? '<div class="note" style="margin-top:4px">Source: ' + esc(p.source) + (p.source_ref ? ' · ' + esc(p.source_ref) : '') + '</div>' : '') +
       '</div>' : '') +
 
     (pattern

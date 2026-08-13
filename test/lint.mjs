@@ -79,5 +79,37 @@ for (const m of html.matchAll(/<script src="\/js\/([^"]+)"><\/script>/g)) {
   }
 }
 
+
+/* ---------- 5. theme integrity ----------
+   Every var() referenced must be defined in :root itself. Checking
+   "defined anywhere in the file" is not enough — a token present only
+   in a theme variant leaves the DEFAULT theme rendering that property
+   with nothing at all, which is exactly the sort of failure that looks
+   fine on the machine where it was written. */
+if (fs.existsSync(cssPath)) {
+  const css = fs.readFileSync(cssPath, 'utf8');
+  const rootBlock = (css.match(/:root\s*\{([\s\S]*?)\}/) || [, ''])[1];
+  if (!rootBlock.trim()) report('public/css/app.css', 0, 'no :root token block found');
+  const defined = new Set([...rootBlock.matchAll(/(--[a-z0-9-]+)\s*:/g)].map(m => m[1]));
+
+  const jsDir = path.join(root, 'public/js');
+  const js = fs.readdirSync(jsDir).filter(f => f.endsWith('.js'))
+    .map(f => fs.readFileSync(path.join(jsDir, f), 'utf8')).join('\n');
+
+  const seen = new Set();
+  for (const [label, src] of [['public/css/app.css', css], ['public/js', js]]) {
+    for (const m of src.matchAll(/var\((--[a-z0-9-]+)/g)) {
+      const key = label + m[1];
+      if (defined.has(m[1]) || seen.has(key)) continue;
+      seen.add(key);
+      report(label, 0, `uses ${m[1]}, which is not defined in :root`);
+    }
+  }
+
+  let depth = 0;
+  for (const ch of css) { if (ch === '{') depth++; else if (ch === '}') depth--; }
+  if (depth !== 0) report('public/css/app.css', 0, `unbalanced braces (depth ${depth})`);
+}
+
 console.log(problems ? `\n${problems} problem(s) found\n` : '  ✓ lint clean\n');
 process.exit(problems ? 1 : 0);

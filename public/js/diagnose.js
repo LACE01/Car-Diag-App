@@ -6,6 +6,7 @@ let liveData = {};       // pid -> {def, samples:[[t,v]]}
 let liveRecording = false;
 let liveStart = 0;
 let lastMonitors = null;
+let PLAY_SCAN = false;   // drives the sweeping scan line while a read is in flight
 
 function renderDiagnose() {
   const el = document.getElementById('s-diagnose');
@@ -17,20 +18,34 @@ function renderDiagnose() {
   const connected = adapter && adapter.connected;
 
   el.innerHTML =
+    /* ---- scan bay: a vehicle outline with a cyan line sweeping it ---- */
+    (connected
+      ? '<div class="scanbay" style="margin-bottom:16px">' +
+      (liveTimer || PLAY_SCAN ? '<div class="scanline"></div>' : '') +
+      ic(v.icon || 'v_pickup', 132, 'stroke-width=".8"') +
+      '<div style="position:absolute;left:16px;top:14px" class="mono">' +
+      '<span class="chip ok"><span class="dot"></span>DIAG // READY</span></div>' +
+      '<div style="position:absolute;right:16px;bottom:14px" class="note mono">' +
+      esc(adapter.protocol || 'AUTO') + '</div></div>'
+      : '') +
+
     /* adapter header */
-    '<div class="card" style="background:linear-gradient(135deg,var(--primary),#8B7CF8);color:#fff;box-shadow:var(--shadow-lg)">' +
+    '<div class="card">' +
     '<div class="between wrap" style="gap:16px"><div class="row" style="gap:16px;align-items:flex-start">' +
-    '<div style="opacity:.9;flex:0 0 auto">' + ic('dlc', 40) + '</div><div>' +
-    '<span class="mlabel" style="color:rgba(255,255,255,.75)">SAE J1962 connector · ISO 15765-4 CAN</span>' +
-    '<h3 style="font-size:19px">' + (connected ? esc(adapter.label) : 'No adapter connected') + '</h3>' +
-    '<p style="margin:5px 0 0;font-size:13px;opacity:.88;max-width:520px">' +
+    '<div style="color:var(--primary);flex:0 0 auto">' + ic('dlc', 36) + '</div><div>' +
+    '<span class="mlabel">SAE J1962 <span class="sep">//</span> ISO 15765-4 CAN</span>' +
+    '<h3 style="font-size:17px">' + (connected ? esc(adapter.label) : 'NO ADAPTER CONNECTED') + '</h3>' +
+    '<p class="note" style="margin:5px 0 0;max-width:520px">' +
     (connected
       ? 'Protocol ' + esc(adapter.protocol || 'auto') + '. Capabilities: ' + [...adapter.capabilities].join(', ') + '. Generic OBD-II modes $01–$0A, powertrain only — ABS, SRS and TCM need manufacturer-specific UDS addressing, so those controls are hidden rather than shown broken.'
       : 'Connect an ELM327 or STN11xx-compatible BLE dongle, or run the demo adapter to see how the screen behaves without a car in front of you.') +
     '</p></div></div>' +
     '<div class="row" style="gap:22px">' +
-    '<div style="text-align:center"><div class="mono" style="font-weight:700;font-size:24px">' + open.length + '</div><div style="font-size:10px;letter-spacing:.12em;opacity:.8">DTCS</div></div>' +
-    '<div style="text-align:center"><div class="mono" style="font-weight:700;font-size:24px">' + monitorSummary() + '</div><div style="font-size:10px;letter-spacing:.12em;opacity:.8">MONITORS</div></div></div></div>' +
+    '<div style="text-align:right"><div class="mono" style="font-weight:700;font-size:23px;color:' +
+    (open.length ? 'var(--bad)' : 'var(--ok)') + '">' + String(open.length).padStart(2, '0') + '</div>' +
+    '<div class="mono" style="font-size:9px;letter-spacing:.14em;color:var(--dim)">DTCS</div></div>' +
+    '<div style="text-align:right"><div class="mono" style="font-weight:700;font-size:23px;color:var(--primary)">' + monitorSummary() + '</div>' +
+    '<div class="mono" style="font-size:9px;letter-spacing:.14em;color:var(--dim)">MONITORS</div></div></div></div>' +
     '<div class="row wrap" style="gap:10px;margin-top:18px">' +
     (connected
       ? '<button class="btn ghost" onclick="scanNow()">Read codes</button>' +
@@ -60,7 +75,7 @@ function renderDiagnose() {
     '</div>' +
 
     (cleared.length ? '<h3 class="sec-h">Code history <span class="chip grey">' + cleared.length + ' cleared</span></h3><div class="card">' +
-      cleared.map(t => '<div class="rowitem"><div class="ico mono" style="font-size:12px;background:#F0EFF7;color:var(--muted)">' + esc(t.code) + '</div>' +
+      cleared.map(t => '<div class="rowitem"><div class="ico grey mono" style="font-size:11px">' + esc(t.code) + '</div>' +
         '<div class="txt"><b>' + esc(t.description || '') + '</b><span>First seen ' + dateShort(t.first_seen) + ' · cleared ' + dateShort(t.cleared_at) +
         (t.clear_count > 1 ? ' · cleared ' + t.clear_count + ' times total' : '') + '</span></div></div>').join('') +
       (cleared.some(t => t.clear_count >= 2) ? '<div class="safety" style="margin-top:14px"><b>A code that keeps coming back</b>Clearing a trouble code does not fix anything. It wipes the freeze frame — the single most useful piece of evidence you had — and resets every readiness monitor, which will fail you at an emissions test. If the same code has returned more than twice, stop clearing it and start testing.</div>' : '') +
@@ -159,6 +174,7 @@ async function disconnectAdapter() {
 async function scanNow() {
   if (!adapter?.connected) return toast('Connect an adapter first', 'bad');
   toast('Reading stored, pending and permanent codes…');
+  PLAY_SCAN = true; renderDiagnose();
   try {
     const stored = await adapter.readDTCs('stored');
     const pending = await adapter.readDTCs('pending');
@@ -182,6 +198,7 @@ async function scanNow() {
       ? codes.length + ' code' + (codes.length > 1 ? 's' : '') + ' read' + (returned.length ? ' — ' + returned.map(x => x.code).join(', ') + ' has returned after a previous clear' : '')
       : 'No trouble codes stored', codes.length ? 'bad' : 'ok');
   } catch (e) { toast(e.message, 'bad'); }
+  finally { PLAY_SCAN = false; renderDiagnose(); }
 }
 
 async function readMonitors() {

@@ -26,8 +26,8 @@ const PARTS = {
 };
 
 const BRAND_ACCENT = {
-  autozone: '#F5A623', oreilly: '#2BB673', napa: '#4A90D9',
-  advance: '#E85D5D', carquest: '#8B7CF8', other: '#8B8AA5'
+  autozone: 'var(--warn)', oreilly: 'var(--ok)', napa: 'var(--primary)',
+  advance: 'var(--bad)', carquest: 'var(--primary-d)', other: 'var(--dim)'
 };
 const PART_SUGGESTIONS = [
   'front brake pads', 'brake rotors', 'water pump', 'alternator', 'starter',

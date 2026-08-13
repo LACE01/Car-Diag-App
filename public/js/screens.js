@@ -2,6 +2,80 @@
    screens.js — maintenance, money, ownership, wear, records, parts
    ============================================================ */
 
+/* ============================================================
+   ODOMETER TIMELINE
+   A mileage route with milestone markers. Out-of-sequence readings
+   are flagged rather than quietly averaged away — a rollback is the
+   single most important thing an odometer log can catch.
+   ============================================================ */
+function odometerTimeline(odo) {
+  const pts = odo.slice(0, 6).reverse();
+  if (pts.length < 2) return '';
+  return '<div class="timeline"><div class="track"></div><div class="marks">' +
+    pts.map((o, i) => {
+      const prev = pts[i - 1];
+      const back = prev && o.value < prev.value;
+      const cls = o.suspect || back ? 'bad' : (prev && o.value - prev.value > 30000 ? 'warn' : '');
+      return '<div class="mk ' + cls + '"><div class="pt"></div>' +
+        '<div class="mi">' + num(o.value) + '</div>' +
+        '<div class="dt">' + String(dateShort(o.at)).toUpperCase() + '</div>' +
+        '<div class="sc">' + esc(o.source) + '</div></div>';
+    }).join('') + '</div></div>';
+}
+
+/* ============================================================
+   REPORT MODULES
+   Each carries a small technical icon and a data preview drawn from
+   the vehicle's own numbers, so the card shows what it will contain.
+   ============================================================ */
+const REPORT_MODULES = [
+  { id: 'history', kind: 'FOR A BUYER', name: 'Vehicle history packet', icon: 'clipboard', blurb: 'Every service, odometer reading, recall status, tire and brake measurement. The thing that gets you your asking price.' },
+  { id: 'handoff', kind: 'FOR A SHOP', name: 'Mechanic hand-off', icon: 'wrench', blurb: 'Symptoms, stored and pending codes, freeze frame, and what you already ruled out. Saves an hour of shop diag time.' },
+  { id: 'cost', kind: 'FOR YOURSELF', name: 'Annual cost summary', icon: 'money', blurb: 'Spend by category, cost per mile, business mileage at the IRS rate, and next year\'s forecast.' },
+  { id: 'ppi', kind: 'BEFORE YOU BUY', name: 'Pre-purchase inspection', icon: 'check', blurb: 'Paperwork, cold start, scan, structure, drivetrain, chassis, fluids and electrics.' },
+  { id: 'warranty', kind: 'FOR A CLAIM', name: 'Warranty claim packet', icon: 'shield', blurb: 'Coverage status plus the maintenance records that a denial usually turns on.' }
+];
+
+/** Tiny inline preview: a timeline, a scan trace, a cost curve, a checklist. */
+function reportPreview(kind, d) {
+  const svg = (inner) => '<svg viewBox="0 0 200 44" preserveAspectRatio="none">' + inner + '</svg>';
+  const C = 'var(--primary)', M = 'var(--line)';
+  if (kind === 'history') {
+    const n = Math.min(7, Math.max(3, (d.service || []).length || 4));
+    return svg('<line x1="8" y1="22" x2="192" y2="22" stroke="' + M + '" stroke-width="1"/>' +
+      Array.from({ length: n }, (_, i) => {
+        const x = 8 + i * (184 / (n - 1));
+        return '<circle cx="' + x.toFixed(1) + '" cy="22" r="3" fill="' + C + '"/>' +
+          '<line x1="' + x.toFixed(1) + '" y1="14" x2="' + x.toFixed(1) + '" y2="30" stroke="' + M + '" stroke-width="1"/>';
+      }).join(''));
+  }
+  if (kind === 'handoff') {
+    return svg('<path d="M6 30 L36 30 L44 12 L56 38 L68 18 L78 30 L194 30" fill="none" stroke="' + C +
+      '" stroke-width="1.6" stroke-linejoin="round"/>' +
+      '<line x1="6" y1="38" x2="194" y2="38" stroke="' + M + '" stroke-width="1"/>');
+  }
+  if (kind === 'cost') {
+    const vals = (d.fuel || []).slice(-8).map(f => f.total || 0);
+    const series = vals.length > 2 ? vals : [12, 18, 15, 22, 19, 26, 24, 30];
+    const mx = Math.max(...series) || 1;
+    return svg(series.map((v, i) => {
+      const x = 10 + i * (180 / series.length), h = Math.max(3, (v / mx) * 30);
+      return '<rect x="' + x.toFixed(1) + '" y="' + (38 - h).toFixed(1) + '" width="' + (150 / series.length).toFixed(1) +
+        '" height="' + h.toFixed(1) + '" fill="' + C + '" opacity=".55" rx="1"/>';
+    }).join('') + '<line x1="6" y1="38" x2="194" y2="38" stroke="' + M + '" stroke-width="1"/>');
+  }
+  if (kind === 'ppi') {
+    return svg([0, 1, 2].map(i => {
+      const y = 12 + i * 11;
+      return '<rect x="12" y="' + (y - 5) + '" width="9" height="9" rx="2" fill="none" stroke="' + C + '" stroke-width="1.2"/>' +
+        '<path d="M14.2 ' + (y - .5) + ' l2 2 l3.4 -4" fill="none" stroke="' + C + '" stroke-width="1.4"/>' +
+        '<line x1="30" y1="' + y + '" x2="' + (120 + i * 25) + '" y2="' + y + '" stroke="' + M + '" stroke-width="2"/>';
+    }).join(''));
+  }
+  return svg('<path d="M100 6 L124 14 v12 c0 10 -10 16 -24 20 c-14 -4 -24 -10 -24 -20 V14 Z" fill="none" stroke="' + C + '" stroke-width="1.5"/>' +
+    '<path d="M92 23 l6 6 l12 -13" fill="none" stroke="' + C + '" stroke-width="1.6"/>');
+}
+
 function statCard(label, value, sub, cls) {
   return '<div class="stat"><span class="mlabel mute">' + esc(label) + '</span>' +
     '<div class="v ' + (String(value).length > 9 ? 'sm' : '') + '"' + (cls ? ' style="color:var(--' + cls + ')"' : '') + '>' + value + '</div>' +
@@ -23,12 +97,12 @@ function renderMaintenance() {
   const fc = d.forecast || { items: [], total: 0 };
 
   el.innerHTML =
-    '<div class="grid g4" style="margin-bottom:8px">' +
-    statCard('Overdue', rems.filter(r => r.overdue).length, 'items past interval', rems.some(r => r.overdue) ? 'bad' : null) +
-    statCard('Due soon', rems.filter(r => !r.overdue && r.cls === 'warn').length, 'within 15% of interval') +
-    statCard('Next 12 mo', money(fc.total, 0), 'forecast at 12k mi/yr') +
-    statCard('Duty', v.duty === 'severe' ? 'SEVERE' : 'NORMAL', v.duty === 'severe' ? 'intervals roughly halved' : 'standard intervals') +
-    '</div>' +
+    telemetry([
+      { label: 'OVERDUE', icon: 'alert', value: String(rems.filter(r => r.overdue).length).padStart(2, '0'), unit: 'past interval', tone: rems.some(r => r.overdue) ? 'bad' : 'ok' },
+      { label: 'DUE SOON', icon: 'bell', value: String(rems.filter(r => !r.overdue && r.cls === 'warn').length).padStart(2, '0'), unit: 'within 15%', tone: 'warn' },
+      { label: 'FORECAST // 12MO', icon: 'money', value: money(fc.total, 0), count: fc.total, prefix: '$', unit: 'at 12k mi/yr', tone: 'cyan' },
+      { label: 'DUTY CYCLE', icon: 'gear', value: v.duty === 'severe' ? 'SEVERE' : 'NORMAL', unit: v.duty === 'severe' ? 'intervals halved' : 'standard', tone: v.duty === 'severe' ? 'warn' : '' }
+    ]) +
 
     /* ---- engine hours ---- */
     '<div class="card" style="margin-top:18px"><div class="between wrap" style="margin-bottom:12px">' +
@@ -232,12 +306,12 @@ function renderMoney() {
   const bizRate = trips[0]?.rate || 0.70;
 
   el.innerHTML =
-    '<div class="grid g4" style="margin-bottom:8px">' +
-    statCard(isEV ? 'Avg mi/kWh' : 'Avg MPG', e.average ?? '—', e.count ? 'over ' + e.count + ' full fills' : 'needs two full fills') +
-    statCard('Cost per mile', t.costPerMile ? money(t.costPerMile, 3) : '—', 'running costs only') +
-    statCard('Lifetime spend', money(t.running, 0), 'service + fuel + other') +
-    statCard('Total cost', money(t.total, 0), t.depreciationToDate != null ? 'incl. ' + money(t.depreciationToDate, 0) + ' depreciation' : 'set purchase price for TCO') +
-    '</div>' +
+    telemetry([
+      { label: isEV ? 'AVG MI/KWH' : 'AVG MPG', icon: 'fuel', value: e.average ?? '—', count: e.average, unit: e.count ? 'over ' + e.count + ' full fills' : 'needs two full fills', tone: 'cyan' },
+      { label: 'COST // MILE', icon: 'money', value: t.costPerMile ? money(t.costPerMile, 3) : '—', unit: 'running costs only' },
+      { label: 'LIFETIME SPEND', icon: 'chart', value: money(t.running, 0), count: t.running, prefix: '$', unit: 'service + fuel + other' },
+      { label: 'TOTAL COST', icon: 'money', value: money(t.total, 0), count: t.total, prefix: '$', unit: t.depreciationToDate != null ? 'incl. ' + money(t.depreciationToDate, 0) + ' depreciation' : 'set purchase price' }
+    ]) +
 
     '<h3 class="sec-h">Against the EPA rating</h3>' + epaHtml() +
 
@@ -259,8 +333,8 @@ function renderMoney() {
     '<div class="card"><span class="mlabel">Where the money goes</span>' +
     barsChart([
       ['Service & repair', t.service || 0, 'var(--primary)'],
-      [isEV ? 'Charging' : 'Fuel', t.fuel || 0, '#D89B00'],
-      ['Insurance, tax, other', t.other || 0, '#4A90D9']
+      [isEV ? 'Charging' : 'Fuel', t.fuel || 0, 'var(--warn)'],
+      ['Insurance, tax, other', t.other || 0, 'var(--ok)']
     ], { fmt: n => money(n, 0) }) +
     '<div class="kv" style="margin-top:8px"><span>Miles owned</span><b class="mono">' + (t.milesOwned ? dist(t.milesOwned, true) : '—') + '</b></div>' +
     '<div class="kv"><span>Per month</span><b class="mono">' + (t.costPerMonth ? money(t.costPerMonth, 0) : '—') + '</b></div>' +
@@ -431,7 +505,7 @@ function renderOwnership() {
     '<div class="between" style="margin:30px 0 14px"><h3 style="font-size:19px">Warranty coverage</h3>' +
     '<button class="btn sm ghost" onclick="addWarranty()">+ Add coverage</button></div><div class="card">' +
     (wars.length ? wars.map(w =>
-      '<div class="rowitem"><div class="ico" style="background:' + (w.expired ? '#F0EFF7' : w.near ? '#FDF0D8' : '#DEF5EA') + ';color:' + (w.expired ? '#8B8AA5' : w.near ? '#A9700A' : '#188752') + '">' + ic('shield', 20) + '</div>' +
+      '<div class="rowitem"><div class="ico ' + (w.expired ? 'grey' : w.near ? 'warn' : 'ok') + '">' + ic('shield', 20) + '</div>' +
       '<div class="txt"><b>' + esc(w.label) + '</b><span>' +
       [w.months ? w.months + ' months' : null, w.miles ? num(w.miles) + ' miles' : null].filter(Boolean).join(' / ') +
       (w.start_date ? ' from ' + dateShort(w.start_date) : '') + (w.provider ? ' · ' + esc(w.provider) : '') + '</span></div>' +
@@ -763,12 +837,12 @@ function renderRecords() {
   const odo = d.odometer || [];
 
   el.innerHTML =
-    '<div class="grid g4" style="margin-bottom:8px">' +
-    statCard('Records', svc.length, 'service entries') +
-    statCard('Spent', money(d.tco?.service, 0), 'on service & repair') +
-    statCard('Odometer', v.mileage ? num(v.mileage) : '—', 'current reading') +
-    statCard('Sessions', (d.sessions || []).length, 'diagnostic scans') +
-    '</div>' +
+    telemetry([
+      { label: 'SERVICE LOG', icon: 'clipboard', value: String(svc.length).padStart(2, '0'), unit: 'entries', tone: svc.length ? 'cyan' : '' },
+      { label: 'SPEND // TOTAL', icon: 'money', value: money(d.tco?.service, 0), count: d.tco?.service, prefix: '$', unit: 'service & repair' },
+      { label: 'ODO', icon: 'chart', value: v.mileage ? num(v.mileage) : '—', count: v.mileage, unit: distUnit() },
+      { label: 'DIAG // SESSIONS', icon: 'dlc', value: String((d.sessions || []).length).padStart(2, '0'), unit: 'scans logged', tone: (d.sessions || []).length ? 'ok' : '' }
+    ]) +
 
     '<div class="between" style="margin:30px 0 14px"><h3 style="font-size:19px">Service history</h3>' +
     '<button class="btn sm" onclick="addRecord()">+ Log service</button></div><div class="card">' +
@@ -780,27 +854,33 @@ function renderRecords() {
       (r.notes ? '<span style="font-size:11.5px">' + esc(r.notes) + '</span>' : '') + '</div>' +
       '<b class="mono" style="font-weight:600">' + money(r.cost, 2) + '</b>' +
       '<button class="btn xs ghost" onclick="delRow(\'service\',' + r.id + ')">×</button></div>').join('')
-      : '<p class="note" style="margin:0;text-align:center;padding:20px">Nothing logged yet. Every entry feeds the reports below — and a documented history is worth real money at resale.</p>') + '</div>' +
+      : '<div class="empty"><div class="ghost-art">' + ic('v_pickup', 160, 'stroke-width=".7"') + '</div>' +
+      '<div class="empty-in"><h4>NO SERVICE RECORDS LOGGED</h4>' +
+      '<p class="note" style="max-width:460px;margin:0 auto 18px">Build a documented maintenance history to support reliability, ownership tracking, and resale value.</p>' +
+      '<div class="row wrap" style="gap:8px;justify-content:center">' +
+      '<button class="btn sm" onclick="addRecord()">+ LOG FIRST SERVICE</button>' +
+      '<button class="btn sm ghost" onclick="logOdometer(' + v.id + ')">ADD ODOMETER READING</button>' +
+      '</div></div></div>') + '</div>' +
 
-    '<h3 class="sec-h">Odometer history</h3><div class="card">' +
+    '<h3 class="sec-h">Odometer history <span class="chip grey mono">' + String(odo.length).padStart(2, '0') + ' READINGS</span></h3><div class="card">' +
     (odo.length
-      ? sparkline(odo.slice().reverse().map(o => o.value)) +
+      ? odometerTimeline(odo) +
+      (odo.length > 3 ? '<div style="margin-top:14px">' + sparkline(odo.slice().reverse().map(o => o.value)) + '</div>' : '') +
       '<div class="scrollx" style="margin-top:12px"><table class="tbl"><thead><tr><th>When</th><th class="num">Reading</th><th>Source</th><th></th></tr></thead><tbody>' +
       odo.slice(0, 12).map(o => '<tr><td>' + dateShort(o.at) + '</td><td class="num">' + num(o.value) + '</td><td>' + esc(o.source) + '</td>' +
-        '<td>' + (o.suspect ? '<span class="chip warn" style="font-size:9px">flagged</span>' : '') + '</td></tr>').join('') +
+        '<td>' + (o.suspect ? '<span class="chip bad" style="font-size:9px">OUT OF SEQUENCE</span>' : '') + '</td></tr>').join('') +
       '</tbody></table></div>'
       : '<p class="note" style="margin:0">No readings yet.</p>') +
     '<p class="note" style="margin:12px 0 0">Every reading carries a source and a timestamp. A reading lower than the one before it gets flagged rather than silently accepted — that is what makes this record worth something to a buyer.</p></div>' +
 
-    '<h3 class="sec-h">Generate a report</h3><div class="grid g3">' +
-    [['For a buyer', 'history', 'Vehicle history packet', 'Every service, odometer reading, recall status, tire and brake measurement. The thing that gets you your asking price.'],
-    ['For a shop', 'handoff', 'Mechanic hand-off packet', 'Symptoms, stored and pending codes, freeze frame, and what you already ruled out. Saves an hour of shop diag time.'],
-    ['For yourself', 'cost', 'Annual cost summary', 'Spend by category, cost per mile, business mileage at the IRS rate, and next year\'s forecast.'],
-    ['Before you buy', 'ppi', 'Pre-purchase inspection', 'A structured checklist covering paperwork, cold start, scan, structure, drivetrain, chassis, fluids and electrics.'],
-    ['For a claim', 'warranty', 'Warranty claim packet', 'Coverage status plus the maintenance records that a denial usually turns on.']]
-      .map(x => '<div class="card"><span class="mlabel">' + x[0] + '</span>' +
-        '<b style="font-weight:600;font-size:15px">' + x[2] + '</b><p class="note" style="margin:6px 0 16px">' + x[3] + '</p>' +
-        '<button class="btn sm block" onclick="makeReport(\'' + x[1] + '\')">Build report</button></div>').join('') + '</div>' +
+    '<h3 class="sec-h">Report modules</h3><div class="grid g3">' +
+    REPORT_MODULES.map(x => '<div class="repmod">' +
+      '<div class="rm-top"><div class="rm-ico">' + ic(x.icon, 18) + '</div>' +
+      '<div style="min-width:0"><div class="rm-kind">' + x.kind + '</div>' +
+      '<div class="rm-name">' + x.name + '</div></div></div>' +
+      '<div class="rm-prev">' + reportPreview(x.id, d) + '</div>' +
+      '<p class="note" style="margin:0 0 14px">' + x.blurb + '</p>' +
+      '<button class="btn sm block" onclick="makeReport(\'' + x.id + '\')">BUILD REPORT</button></div>').join('') + '</div>' +
 
     '<h3 class="sec-h">Import a scanner report</h3><div class="card">' +
     '<p class="note" style="margin:0 0 14px">Topdon publishes no developer SDK, so rather than reverse-engineer their BLE protocol, Garage imports the reports their app exports. Paste the text or CSV of any scan report — Topdon, Autel, Launch, a shop printout — and every trouble code in it lands in this vehicle\'s history with its J2012 definition.</p>' +

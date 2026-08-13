@@ -122,16 +122,18 @@ async function go(id) {
   menu(false);
   if (id !== 'garage' && state.activeId && !state.detail) await loadDetail();
   renderers[id]();
+  runCounters(document.getElementById('s-' + id));
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 function menu(o) { document.body.classList.toggle('menu', o); }
 window.rerender = () => { if (renderers[state.screen]) renderers[state.screen](); renderNav(); };
 
 function needVehicle(el, what) {
-  el.innerHTML = '<div class="card empty"><div style="color:var(--primary);opacity:.45;margin-bottom:10px">' + ic('v_sedan', 46) + '</div>' +
-    '<b style="display:block;font-size:16px;color:var(--ink);margin-bottom:6px">No vehicle selected</b>' +
-    '<p class="note" style="max-width:360px;margin:0 auto 18px">Add a vehicle to ' + what + '.</p>' +
-    '<button class="btn sm" onclick="openAdd()">+ Add vehicle</button></div>';
+  el.innerHTML = '<div class="card empty">' +
+    '<div class="ghost-art">' + ic('v_pickup', 150, 'stroke-width=".7"') + '</div>' +
+    '<div class="empty-in"><h4>NO VEHICLE SELECTED</h4>' +
+    '<p class="note" style="max-width:380px;margin:0 auto 18px">Add a vehicle to ' + what + '.</p>' +
+    '<button class="btn sm" onclick="openAdd()">+ ADD VEHICLE</button></div></div>';
 }
 
 /* ============================================================
@@ -175,13 +177,7 @@ async function refreshDetail() {
    NAV
    ============================================================ */
 function renderNav() {
-  const sel = document.getElementById('navveh');
-  if (state.vehicles.length) {
-    sel.classList.remove('hide');
-    sel.innerHTML = state.vehicles.map(v =>
-      '<option value="' + v.id + '"' + (v.id === state.activeId ? ' selected' : '') + '>' +
-      esc(v.nickname || vLabel(v)) + '</option>').join('');
-  } else sel.classList.add('hide');
+  renderVehicleIdentity();
 
   const bad = state.alerts.filter(a => a.level === 'bad').length;
   const b = document.querySelector('.nav a[data-go="garage"] .badge');
@@ -192,6 +188,44 @@ function renderNav() {
   }
   const av = document.querySelector('.topbar .avatar');
   if (av && state.user) av.textContent = (state.user.name || state.user.email).slice(0, 2).toUpperCase();
+}
+
+/* ============================================================
+   VEHICLE IDENTITY
+   The selector, promoted to an identity module: what truck, how many
+   miles, which VIN, and one unambiguous health state.
+   ============================================================ */
+function renderVehicleIdentity() {
+  const host = document.getElementById('vid');
+  if (!host) return;
+  const v = activeVehicle();
+  if (!v) { host.innerHTML = ''; host.classList.add('hide'); return; }
+  host.classList.remove('hide');
+
+  const overdue = v.due?.overdue || 0;
+  const recalls = v.open_recalls || 0;
+  const state_ = recalls || overdue ? (recalls ? 'bad' : 'warn') : 'ok';
+  const stateLabel = recalls ? 'SERVICE DUE // RECALL'
+    : overdue ? 'ATTENTION // ' + overdue + ' OVERDUE'
+      : 'HEALTHY';
+  const vin = v.vin ? '******' + String(v.vin).slice(-6) : '—';
+
+  host.innerHTML =
+    '<div class="vid-top">' +
+    '<span class="vid-icon">' + ic(v.icon || 'v_pickup', 26) + '</span>' +
+    '<div style="min-width:0"><div class="vid-name">' + esc(v.nickname || vLabel(v)) + '</div>' +
+    '<div class="vid-sub">' + esc(v.trim || v.engine || 'VEHICLE') + '</div></div></div>' +
+    '<div class="vid-rows">' +
+    '<div class="vid-row"><span>ODO</span><b>' + (v.mileage ? dist(v.mileage) + ' ' + distUnit().toUpperCase() : '—') + '</b></div>' +
+    '<div class="vid-row"><span>VIN</span><b>' + esc(vin) + '</b></div>' +
+    '</div>' +
+    '<div class="vid-state ' + state_ + (state_ === 'warn' ? ' pulse-warn' : '') + '">' +
+    '<span class="dot"></span>' + stateLabel + '</div>' +
+    (state.vehicles.length > 1
+      ? '<select onchange="setActive(+this.value)" aria-label="Active vehicle">' +
+      state.vehicles.map(x => '<option value="' + x.id + '"' + (x.id === state.activeId ? ' selected' : '') + '>' +
+        esc(x.nickname || vLabel(x)) + '</option>').join('') + '</select>'
+      : '');
 }
 
 /* ============================================================
@@ -337,9 +371,11 @@ function renderGarage() {
   const g = document.getElementById('veh-grid');
   const openR = state.vehicles.reduce((n, v) => n + (v.open_recalls || 0), 0);
   const overdue = state.vehicles.reduce((n, v) => n + (v.due?.overdue || 0), 0);
-  document.getElementById('garagesub').textContent = state.vehicles.length
-    ? `${state.vehicles.length} vehicle${state.vehicles.length > 1 ? 's' : ''} · ${openR} open recall${openR === 1 ? '' : 's'} · ${overdue} item${overdue === 1 ? '' : 's'} overdue`
-    : 'No vehicles yet — add one to begin';
+  document.getElementById('garagesub').innerHTML = state.vehicles.length
+    ? '<span class="mono">FLEET // ' + String(state.vehicles.length).padStart(2, '0') + ' VEHICLES' +
+      '<span class="sep">//</span>' + String(openR).padStart(2, '0') + ' OPEN RECALLS' +
+      '<span class="sep">//</span>' + String(overdue).padStart(2, '0') + ' OVERDUE</span>'
+    : '<span class="mono">FLEET // 00 VEHICLES</span>';
 
   g.innerHTML = state.vehicles.map(v => {
     const rc = v.open_recalls || 0;
@@ -348,7 +384,7 @@ function renderGarage() {
       ? '<span class="chip bad"><span class="dot"></span>' + rc + ' recall' + (rc > 1 ? 's' : '') + '</span>'
       : od ? '<span class="chip warn"><span class="dot"></span>' + od + ' overdue</span>'
         : '<span class="chip ok"><span class="dot"></span>All clear</span>';
-    return '<div class="veh"><div class="hero" style="background:linear-gradient(135deg,' + (v.hue || '#EDEAFE,#DCD6FC') + ')" onclick="setActive(' + v.id + ').then(()=>go(\'vehicle\'))">' +
+    return '<div class="veh"><div class="hero" onclick="setActive(' + v.id + ').then(()=>go(\'vehicle\'))">' +
       ic(v.icon, 70, 'stroke-width="1.2"') + '<div style="position:absolute;top:12px;right:12px">' + badge + '</div>' +
       '<button class="x" onclick="removeVehicle(' + v.id + ',event)" title="Remove">&times;</button></div>' +
       '<div class="body"><h3 onclick="setActive(' + v.id + ').then(()=>go(\'vehicle\'))">' + esc(v.nickname || vLabel(v)) + '</h3>' +
@@ -360,7 +396,9 @@ function renderGarage() {
       (v.economy ? v.economy + ' <small style="font-family:Inter">' + v.economy_unit + '</small>' : '<small style="font-family:Inter">Log fuel</small>') + '</div></div>' +
       '</div></div></div>';
   }).join('') +
-    '<div class="addveh" onclick="openAdd()"><div><div style="font-size:34px;margin-bottom:8px;line-height:1">+</div>Add a vehicle<div class="note" style="margin-top:5px">VIN or year / make / model</div></div></div>';
+    '<div class="addveh" onclick="openAdd()"><div>' + ic('plus', 26) +
+    '<div style="margin-top:8px">+ ADD VEHICLE</div>' +
+    '<div class="note" style="margin-top:5px;text-transform:none;letter-spacing:0">VIN decode or year / make / model</div></div></div>';
 
   renderAlerts();
 }
@@ -369,12 +407,14 @@ function renderAlerts() {
   const a = document.getElementById('alerts');
   if (!state.alerts.length) {
     a.innerHTML = state.vehicles.length
-      ? '<h3 class="sec-h">Notification board</h3><div class="card empty"><div style="color:var(--ok);margin-bottom:8px">' + ic('check', 34) + '</div><b style="color:var(--ink)">Nothing needs your attention</b><p class="note" style="margin:6px 0 0">No open recalls, nothing overdue, no stored codes.</p></div>'
+      ? '<h3 class="sec-h">Notification board</h3><div class="card empty"><div class="empty-in">' +
+      '<div style="color:var(--ok);margin-bottom:10px">' + ic('check', 32) + '</div>' +
+      '<h4>SYSTEM STATUS // HEALTHY</h4>' +
+      '<p class="note" style="margin:0">No open recalls, nothing overdue, no stored codes.</p></div></div>'
       : '';
     return;
   }
   const icons = { recall: 'alert', maintenance: 'wrench', warranty: 'shield', document: 'doc', tires: 'tire', battery: 'battery', brakes: 'brake', dtc: 'mil', odometer: 'chart' };
-  const cols = { bad: ['#FBE1E1', '#C33A3A'], warn: ['#FDF0D8', '#A9700A'], ok: ['#DEF5EA', '#188752'] };
   a.innerHTML = '<h3 class="sec-h">Notification board <span class="chip ' + (state.alerts.some(x => x.level === 'bad') ? 'bad' : 'warn') + '">' + state.alerts.length + '</span>' +
     '<span class="src">Live · NHTSA + your records</span></h3><div class="card">' +
     state.alerts.slice(0, 30).map(x => {
@@ -416,10 +456,8 @@ async function loadVehicleExtras(force) {
 }
 
 const LEVEL_STYLE = {
-  critical: ['bad', 'CRITICAL', '#FBE1E1', '#C33A3A'],
-  high: ['bad', 'HIGH', '#FBE1E1', '#C33A3A'],
-  medium: ['warn', 'MEDIUM', '#FDF0D8', '#A9700A'],
-  info: ['grey', 'INFO', '#F0EFF7', '#8B8AA5']
+  critical: ['bad', 'CRITICAL'], high: ['bad', 'HIGH'],
+  medium: ['warn', 'MEDIUM'], info: ['grey', 'INFO']
 };
 
 function attentionHtml() {
@@ -431,9 +469,10 @@ function attentionHtml() {
   }
   const { items, counts } = VH.attention;
   if (!items.length) {
-    return '<div class="card empty"><div style="color:var(--ok);margin-bottom:8px">' + ic('check', 34) + '</div>' +
-      '<b style="color:var(--ink)">Nothing needs your attention</b>' +
-      '<p class="note" style="margin:6px 0 0">No unremedied recalls, no open federal investigation, nothing overdue, no stored codes.</p></div>';
+    return '<div class="card empty"><div class="empty-in">' +
+      '<div style="color:var(--ok);margin-bottom:10px">' + ic('check', 32) + '</div>' +
+      '<h4>SYSTEM STATUS // HEALTHY</h4>' +
+      '<p class="note" style="margin:0">No unremedied recalls, no open federal investigation, nothing overdue, no stored codes.</p></div></div>';
   }
   const icons = { recall: 'alert', investigation: 'alert', dtc: 'mil', maintenance: 'wrench', battery: 'battery', tires: 'tire', brakes: 'brake', warranty: 'shield', document: 'doc', economy: 'chart', complaints: 'user', tsb: 'doc', weather: 'temp' };
 
@@ -445,7 +484,7 @@ function attentionHtml() {
       const st = LEVEL_STYLE[x.level] || LEVEL_STYLE.info;
       return '<div style="padding:14px 0;border-bottom:1px solid var(--line)">' +
         '<div class="row" style="gap:14px;align-items:flex-start">' +
-        '<div class="ico" style="background:' + st[2] + ';color:' + st[3] + '">' + ic(icons[x.kind] || 'alert', 20) + '</div>' +
+        '<div class="ico ' + st[0] + (x.level === 'critical' ? ' pulse-bad' : '') + '">' + ic(icons[x.kind] || 'alert', 20) + '</div>' +
         '<div style="flex:1;min-width:0">' +
         '<div class="between wrap" style="gap:8px"><b style="font-weight:600;font-size:15px">' + esc(x.title) + '</b>' +
         '<span class="chip ' + st[0] + '" style="font-size:9px">' + st[1] + '</span></div>' +
@@ -478,7 +517,7 @@ function renderVehicle() {
   const openDtc = (d.dtcs || []).filter(t => !t.cleared_at);
 
   el.innerHTML =
-    '<div class="stage"><div class="art" style="background:linear-gradient(150deg,' + (v.hue || '#EDEAFE,#DCD6FC') + ')">' + ic(v.icon, 150, 'stroke-width="1"') +
+    '<div class="stage"><div class="art">' + ic(v.icon, 140, 'stroke-width="1"') +
     (v.vin ? '<span class="chip mono" style="position:absolute;top:16px;left:16px">' + esc(v.vin) + '</span>' : '') +
     '<span class="chip ' + (openR.length ? 'bad' : 'ok') + '" style="position:absolute;top:16px;right:16px"><span class="dot"></span>' +
     (openR.length ? openR.length + ' open recall' + (openR.length > 1 ? 's' : '') : 'No open recalls') + '</span></div>' +
@@ -527,7 +566,7 @@ function renderVehicle() {
       (ctx.investigations.open.length
         ? ctx.investigations.open.map(i => '<div style="padding:14px 0;border-bottom:1px solid var(--line)">' +
           '<div class="row" style="gap:14px;align-items:flex-start">' +
-          '<div class="ico" style="background:#FBE1E1;color:#C33A3A">' + ic('alert', 20) + '</div>' +
+          '<div class="ico bad">' + ic('alert', 20) + '</div>' +
           '<div style="flex:1;min-width:0"><div class="between wrap">' +
           '<b class="mono" style="font-size:13px">' + esc(i.number || 'Investigation') + '</b>' +
           '<span class="chip bad">OPEN</span></div>' +
@@ -555,7 +594,7 @@ function renderVehicle() {
       ? '<h3 class="sec-h">Manufacturer communications <span class="chip grey">' + ctx.communications.total + '</span>' +
       '<span class="src">NHTSA bulk dataset</span></h3><div class="card">' +
       ((ctx.communications.warrantyExtensions || []).length
-        ? '<div class="safety" style="background:#DEF5EA;border-color:var(--ok);color:#0F5A38;margin-bottom:14px">' +
+        ? '<div class="safety" style="background:var(--ok-l);border-color:var(--ok);color:var(--ok);margin-bottom:14px">' +
         '<b>Warranty extensions — read these</b>' +
         ctx.communications.warrantyExtensions.slice(0, 3).map(w =>
           esc(w.number || '') + ' · ' + esc(String(w.subject || '').slice(0, 180))).join('<br>') +
@@ -605,8 +644,7 @@ function renderVehicle() {
       d.recalls.map(r => {
         const st = r.completion_status || (r.completed ? 'owner_marked_complete' : 'unknown');
         const badge = st === 'verified' ? ['ok', 'VERIFIED'] : st === 'owner_marked_complete' ? ['warn', 'SELF-REPORTED'] : ['bad', 'NO REMEDY RECORDED'];
-        return '<div class="rowitem"><div class="ico" style="background:' + (st === 'verified' ? '#DEF5EA' : st === 'owner_marked_complete' ? '#FDF0D8' : '#FBE1E1') +
-          ';color:' + (st === 'verified' ? '#188752' : st === 'owner_marked_complete' ? '#A9700A' : '#C33A3A') + '">' +
+        return '<div class="rowitem"><div class="ico ' + (st === 'verified' ? 'ok' : st === 'owner_marked_complete' ? 'warn' : 'bad') + '">' +
           ic(st === 'verified' ? 'check' : 'alert', 20) + '</div>' +
           '<div class="txt"><b class="mono" style="font-size:13px">' + esc(r.campaign) + '</b>' +
           '<span>' + esc(String(r.component || '').split(':')[0]) + '</span>' +
@@ -756,7 +794,6 @@ async function boot() {
   });
   document.getElementById('brandmark').innerHTML = ic('wrench', 20);
   document.getElementById('burgerbtn').innerHTML = ic('menu', 22);
-  document.getElementById('navveh').addEventListener('change', e => setActive(+e.target.value));
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') { menu(false); closeInsp(); closeModal(); }
     // the player is a keyboard-friendly place to be: arrows advance, space ticks

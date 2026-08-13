@@ -157,13 +157,13 @@ function torqueSvg(pattern, opts = {}) {
 
   const body = (() => {
     if (layout === 'circular' || layout === 'wheel') {
-      return '<circle cx="220" cy="200" r="175" fill="#F6F5FC" stroke="#2B2D42" stroke-width="1.8"/>' +
-        '<circle cx="220" cy="200" r="62" fill="#EFEDFB" stroke="#2B2D42" stroke-width="1.4"/>' +
+      return '<circle cx="220" cy="200" r="175" fill="#EEF3F7" stroke="#2B2D42" stroke-width="1.8"/>' +
+        '<circle cx="220" cy="200" r="62" fill="#E3EDF2" stroke="#2B2D42" stroke-width="1.4"/>' +
         (layout === 'wheel' ? '<circle cx="220" cy="200" r="196" fill="none" stroke="#8B8AA5" stroke-width="10" opacity=".5"/>' : '');
     }
-    if (layout === 'rect') return '<rect x="50" y="90" width="340" height="220" rx="10" fill="#F6F5FC" stroke="#2B2D42" stroke-width="1.8"/>';
-    if (layout === 'linear') return '<rect x="40" y="170" width="360" height="60" rx="8" fill="#F6F5FC" stroke="#2B2D42" stroke-width="1.8"/>';
-    return '<rect x="40" y="90" width="360" height="220" rx="10" fill="#F6F5FC" stroke="#2B2D42" stroke-width="1.8"/>' +
+    if (layout === 'rect') return '<rect x="50" y="90" width="340" height="220" rx="10" fill="#EEF3F7" stroke="#2B2D42" stroke-width="1.8"/>';
+    if (layout === 'linear') return '<rect x="40" y="170" width="360" height="60" rx="8" fill="#EEF3F7" stroke="#2B2D42" stroke-width="1.8"/>';
+    return '<rect x="40" y="90" width="360" height="220" rx="10" fill="#EEF3F7" stroke="#2B2D42" stroke-width="1.8"/>' +
       '<path d="M40 200h360" stroke="#8B8AA5" stroke-width="1" stroke-dasharray="5 5"/>';
   })();
 
@@ -175,7 +175,7 @@ function torqueSvg(pattern, opts = {}) {
     const seq = number[i];
     const done = seq <= upTo;
     const current = seq === upTo;
-    const fill = current ? '#6C5CE7' : done ? '#DDD8FA' : '#fff';
+    const fill = current ? '#0E7C93' : done ? '#CFE7EE' : '#fff';
     const txt = current ? '#fff' : '#2B2D42';
     return '<g>' +
       '<circle cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1) + '" r="' + (current ? 17 : 14) + '" ' +
@@ -184,16 +184,16 @@ function torqueSvg(pattern, opts = {}) {
       'font-family="Inter,sans-serif" font-size="13" font-weight="700" fill="' + txt + '">' + seq + '</text></g>';
   }).join('');
 
-  return '<svg viewBox="0 0 440 400" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;background:#fff;border-radius:14px">' +
+  return '<svg viewBox="0 0 440 400" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;background:#F4F7FA;border-radius:12px">' +
     '<rect x="4" y="4" width="432" height="392" rx="10" fill="#fff" stroke="#2B2D42" stroke-width="1.2"/>' +
-    '<rect x="4" y="4" width="432" height="30" fill="#F6F5FC" stroke="#2B2D42" stroke-width="1.2"/>' +
-    '<text x="18" y="24" font-family="Poppins,Inter,sans-serif" font-size="12" font-weight="700" fill="#2B2D42">' +
+    '<rect x="4" y="4" width="432" height="30" fill="#EEF3F7" stroke="#2B2D42" stroke-width="1.2"/>' +
+    '<text x="18" y="24" font-family="Manrope,Inter,sans-serif" font-size="12" font-weight="700" fill="#2B2D42">' +
     esc(title.toUpperCase()) + '</text>' +
-    '<text x="422" y="24" text-anchor="end" font-family="Inter" font-size="9" fill="#8B8AA5">' + n + ' FASTENERS</text>' +
+    '<text x="422" y="24" text-anchor="end" font-family="Inter" font-size="9" fill="#65758A">' + n + ' FASTENERS</text>' +
     body +
-    '<path d="' + path + '" fill="none" stroke="#6C5CE7" stroke-width="2" stroke-dasharray="6 4" opacity=".55"/>' +
+    '<path d="' + path + '" fill="none" stroke="#0E7C93" stroke-width="2" stroke-dasharray="6 4" opacity=".5"/>' +
     bolts +
-    '<text x="18" y="386" font-family="Inter" font-size="9" fill="#8B8AA5">Numbers are the tightening ORDER, not fastener identifiers. Loosen in reverse.</text>' +
+    '<text x="18" y="386" font-family="Inter" font-size="9" fill="#65758A">Numbers are the tightening ORDER, not fastener identifiers. Loosen in reverse.</text>' +
     '</svg>';
 }
 

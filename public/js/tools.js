@@ -266,8 +266,7 @@ function toolRow(t) {
   const owned = OWNED_TOOLS.has(t.id);
   const brands = t.brands.filter(b => PREFERRED_BRANDS.includes(b));
   return '<div class="rowitem" style="padding:10px 0">' +
-    '<button class="ico" style="cursor:pointer;background:' + (owned ? '#DEF5EA' : 'var(--primary-l)') +
-    ';color:' + (owned ? '#188752' : 'var(--primary)') + '" onclick="toggleTool(\'' + t.id + '\')" ' +
+    '<button class="ico ' + (owned ? 'ok' : '') + '" style="cursor:pointer" onclick="toggleTool(\'' + t.id + '\')" ' +
     'title="' + (owned ? 'You own this' : 'Mark as owned') + '">' + ic(owned ? 'check' : 'plus', 18) + '</button>' +
     '<div class="txt"><b>' + esc(t.name) + (t.safety ? ' <span class="chip bad" style="font-size:9px;padding:1px 7px">SAFETY</span>' : '') + '</b>' +
     (t.note ? '<span>' + esc(t.note) + '</span>' : '') +

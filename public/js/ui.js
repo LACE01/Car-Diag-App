@@ -93,11 +93,11 @@ function setNet(s) {
   const p = document.getElementById('netpill');
   if (!p) return;
   const map = {
-    online: ['#8DF0BE', 'Live · NHTSA + local'],
-    cache: ['#FFD37A', 'Offline — showing cached'],
-    offline: ['#FF9A9A', 'No server connection']
+    online: ['var(--ok)', 'LINK // LIVE'],
+    cache: ['var(--warn)', 'LINK // CACHED'],
+    offline: ['var(--bad)', 'LINK // DOWN']
   };
-  const [c, t] = map[s] || ['#DDD', 'Checking…'];
+  const [c, t] = map[s] || ['var(--dim)', 'LINK // …'];
   p.innerHTML = '<span class="dot" style="background:' + c + '"></span> ' + t;
 }
 
@@ -158,6 +158,42 @@ function closeInsp() {
   document.querySelectorAll('.hot.sel,.keyrow.sel').forEach(g => g.classList.remove('sel'));
 }
 
+/* ---------- telemetry ----------
+   Metric modules read like an instrument cluster: mono numerals with
+   tabular figures so they do not jitter while counting, a technical
+   label, and colour only where it means something. */
+function telemetry(cells) {
+  return '<div class="telem">' + cells.map(c =>
+    '<div class="cell ' + (c.tone || '') + '">' +
+    '<div class="lab">' + (c.icon ? ic(c.icon, 12) : '') + esc(c.label) + '</div>' +
+    '<div class="v ' + (String(c.value).length > 9 ? 'sm' : '') + '"' +
+    (c.count ? ' data-count="' + c.count + '"' + (c.prefix ? ' data-prefix="' + esc(c.prefix) + '"' : '') + '' : '') +
+    '>' + c.value + '</div>' +
+    (c.unit ? '<div class="u">' + esc(c.unit) + '</div>' : '') +
+    '</div>').join('') + '</div>';
+}
+
+/* Numbers count in once on load — the way a cluster sweeps at key-on.
+   Skipped entirely under prefers-reduced-motion. */
+function runCounters(root) {
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  (root || document).querySelectorAll('[data-count]').forEach(el => {
+    const target = parseFloat(el.dataset.count);
+    if (!isFinite(target)) return;
+    const prefix = el.dataset.prefix || '';
+    const dec = (el.dataset.count.split('.')[1] || '').length;
+    if (reduce) { el.textContent = prefix + num(target, dec); return; }
+    const dur = 560, t0 = performance.now();
+    const tick = now => {
+      const k = Math.min(1, (now - t0) / dur);
+      const eased = 1 - Math.pow(1 - k, 3);
+      el.textContent = prefix + num(target * eased, dec);
+      if (k < 1) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+}
+
 /* ---------- small charts, drawn inline (no chart library) ---------- */
 function sparkline(values, opts) {
   const o = opts || {};
@@ -172,10 +208,13 @@ function sparkline(values, opts) {
   const d = pts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join('');
   const area = d + 'L' + pts[pts.length - 1][0].toFixed(1) + ' ' + h + 'L' + pts[0][0].toFixed(1) + ' ' + h + 'Z';
   const col = o.color || 'var(--primary)';
-  return '<svg class="spark" viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none">' +
-    '<path d="' + area + '" fill="' + col + '" opacity=".12"/>' +
-    '<path d="' + d + '" fill="none" stroke="' + col + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>' +
-    pts.map(p => '<circle cx="' + p[0].toFixed(1) + '" cy="' + p[1].toFixed(1) + '" r="2.2" fill="' + col + '"/>').join('') +
+  const ticks = [0, .25, .5, .75, 1].map(f =>
+    '<line x1="0" x2="' + w + '" y1="' + (pad + f * (h - pad * 2)).toFixed(1) + '" y2="' + (pad + f * (h - pad * 2)).toFixed(1) +
+    '" stroke="var(--line)" stroke-width=".5" opacity=".7"/>').join('');
+  return '<svg class="spark" viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none">' + ticks +
+    '<path d="' + area + '" fill="' + col + '" opacity=".10"/>' +
+    '<path d="' + d + '" fill="none" stroke="' + col + '" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>' +
+    pts.map(p => '<circle cx="' + p[0].toFixed(1) + '" cy="' + p[1].toFixed(1) + '" r="1.8" fill="' + col + '"/>').join('') +
     '</svg>';
 }
 
@@ -214,14 +253,16 @@ function safetyBox(kind) {
 
 /* ---------- boot preferences ---------- */
 function applyPrefs() {
-  const dark = localStorage.getItem('garage.dark') === '1';
+  // The app is dark by default — it is an instrument panel. "Daylight"
+  // is the high-contrast light variant for reading it outside at noon.
+  const day = localStorage.getItem('garage.daylight') === '1';
   const gm = localStorage.getItem('garage.garagemode') === '1';
   const metric = localStorage.getItem('garage.metric') === '1';
-  document.body.classList.toggle('dark', dark);
+  document.body.classList.toggle('daylight', day);
   document.body.classList.toggle('garagemode', gm);
   UNITS.metric = metric;
   const set = (id, on) => { const e = document.getElementById(id); if (e) e.classList.toggle('on', on); };
-  set('t-dark', dark); set('t-gm', gm); set('t-metric', metric);
+  set('t-day', day); set('t-gm', gm); set('t-metric', metric);
 }
 function togglePref(key, cls) {
   const cur = localStorage.getItem('garage.' + key) === '1';
