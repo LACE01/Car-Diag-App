@@ -21,6 +21,10 @@ import {
   ingestInvestigations, ingestCommunications, investigationsFor, communicationsFor,
   allIngestStatus, blocksForYears, TSB_BLOCKS
 } from './ingest.js';
+import {
+  ownProcedure, fullProcedure, listProcedures, resequence, moveStep,
+  startRun, updateRun, companionLinks
+} from './procedures.js';
 import * as core from './core.js';
 
 export const api = express.Router();
@@ -1333,6 +1337,229 @@ api.delete('/part-prices/:pid', requireAuth, wrap(async (req, res) => {
   if (!row) throw httpErr(404, 'Not found.');
   db.prepare('DELETE FROM part_prices WHERE id=?').run(row.id);
   res.json({ ok: true });
+}));
+
+/* ============================================================
+   PROCEDURES — owner-authored, illustrated, step-by-step
+   ============================================================ */
+const PROC_FIELDS = ['vehicle_id', 'title', 'system', 'category', 'difficulty', 'est_minutes',
+  'est_cost', 'summary', 'safety_flags', 'source', 'source_ref', 'tool_ids', 'archived'];
+const STEP_FIELDS = ['title', 'body', 'media_id', 'torque_value', 'torque_pattern_id',
+  'warning', 'tool_ids', 'part_note', 'is_check'];
+
+api.get('/procedures', requireAuth, wrap(async (req, res) => {
+  const vid = req.query.vehicle_id ? +req.query.vehicle_id : null;
+  if (vid) assertVehicle(req.user.id, vid);
+  res.json({ procedures: listProcedures(req.user.id, vid) });
+}));
+
+api.post('/procedures', requireAuth, wrap(async (req, res) => {
+  const d = pick(req.body || {}, PROC_FIELDS);
+  if (!d.title) throw httpErr(400, 'A procedure needs a title.');
+  if (d.vehicle_id) assertVehicle(req.user.id, +d.vehicle_id, true);
+  if (Array.isArray(d.safety_flags)) d.safety_flags = d.safety_flags.join(',');
+  if (Array.isArray(d.tool_ids)) d.tool_ids = d.tool_ids.join(',');
+  d.user_id = req.user.id;
+  const p = insert('procedures', d);
+  audit(req.user.id, d.vehicle_id, 'procedure.create', p.title);
+  res.status(201).json({ procedure: fullProcedure(p.id) });
+}));
+
+api.get('/procedures/:pid', requireAuth, wrap(async (req, res) => {
+  const p = ownProcedure(req.user.id, +req.params.pid, false);
+  const vehicle = p.vehicle_id ? db.prepare('SELECT * FROM vehicles WHERE id=?').get(p.vehicle_id) : null;
+  res.json({
+    procedure: fullProcedure(p.id),
+    companion: companionLinks(vehicle, p.system, p.title)
+  });
+}));
+
+api.patch('/procedures/:pid', requireAuth, wrap(async (req, res) => {
+  const p = ownProcedure(req.user.id, +req.params.pid);
+  const d = pick(req.body || {}, PROC_FIELDS);
+  if (Array.isArray(d.safety_flags)) d.safety_flags = d.safety_flags.join(',');
+  if (Array.isArray(d.tool_ids)) d.tool_ids = d.tool_ids.join(',');
+  d.updated_at = new Date().toISOString();
+  update('procedures', p.id, d);
+  res.json({ procedure: fullProcedure(p.id) });
+}));
+
+api.delete('/procedures/:pid', requireAuth, wrap(async (req, res) => {
+  const p = ownProcedure(req.user.id, +req.params.pid);
+  db.prepare('DELETE FROM procedures WHERE id=?').run(p.id);
+  res.json({ ok: true });
+}));
+
+/* ---- media: the user's own photographs ---- */
+api.post('/procedures/:pid/media', requireAuth, upload.single('file'), wrap(async (req, res) => {
+  const p = ownProcedure(req.user.id, +req.params.pid);
+  const d = {
+    procedure_id: p.id,
+    kind: req.body?.kind || 'photo',
+    caption: req.body?.caption || null,
+    sort: +(req.body?.sort || 0)
+  };
+  if (req.file) {
+    d.file_path = path.basename(req.file.path);
+    d.file_name = req.file.originalname;
+    d.file_mime = req.file.mimetype;
+    d.file_size = req.file.size;
+  } else if (req.body?.svg) {
+    d.kind = 'torque';
+    d.svg = String(req.body.svg).slice(0, 300000);
+  } else throw httpErr(400, 'Attach a photo, or supply a generated figure.');
+  res.status(201).json({ media: insert('procedure_media', d) });
+}));
+
+api.delete('/media/:mid', requireAuth, wrap(async (req, res) => {
+  const m = db.prepare('SELECT * FROM procedure_media WHERE id=?').get(+req.params.mid);
+  if (!m) throw httpErr(404, 'Not found.');
+  ownProcedure(req.user.id, m.procedure_id);
+  db.prepare('DELETE FROM procedure_media WHERE id=?').run(m.id);
+  res.json({ ok: true });
+}));
+
+/** Procedure images are served here so they inherit procedure ownership. */
+api.get('/procedure-files/:name', requireAuth, wrap(async (req, res) => {
+  const name = path.basename(req.params.name);
+  const m = db.prepare('SELECT * FROM procedure_media WHERE file_path=?').get(name);
+  if (!m) throw httpErr(404, 'File not found.');
+  ownProcedure(req.user.id, m.procedure_id, false);
+  const fp = path.join(UPLOAD_DIR, name);
+  if (!fs.existsSync(fp)) throw httpErr(404, 'File missing from storage.');
+  res.sendFile(fp);
+}));
+
+/* ---- steps ---- */
+api.post('/procedures/:pid/steps', requireAuth, wrap(async (req, res) => {
+  const p = ownProcedure(req.user.id, +req.params.pid);
+  const d = pick(req.body || {}, STEP_FIELDS);
+  if (!d.title) throw httpErr(400, 'A step needs a title.');
+  if (Array.isArray(d.tool_ids)) d.tool_ids = d.tool_ids.join(',');
+  d.procedure_id = p.id;
+  d.seq = (db.prepare('SELECT COALESCE(MAX(seq),0) m FROM procedure_steps WHERE procedure_id=?').get(p.id).m) + 1;
+  const s = insert('procedure_steps', d);
+  db.prepare('UPDATE procedures SET updated_at=? WHERE id=?').run(new Date().toISOString(), p.id);
+  res.status(201).json({ step: s });
+}));
+
+api.patch('/steps/:sid', requireAuth, wrap(async (req, res) => {
+  const s = db.prepare('SELECT * FROM procedure_steps WHERE id=?').get(+req.params.sid);
+  if (!s) throw httpErr(404, 'Step not found.');
+  ownProcedure(req.user.id, s.procedure_id);
+  const d = pick(req.body || {}, STEP_FIELDS);
+  if (Array.isArray(d.tool_ids)) d.tool_ids = d.tool_ids.join(',');
+  res.json({ step: update('procedure_steps', s.id, d) });
+}));
+
+api.post('/steps/:sid/move', requireAuth, wrap(async (req, res) => {
+  const s = db.prepare('SELECT * FROM procedure_steps WHERE id=?').get(+req.params.sid);
+  if (!s) throw httpErr(404, 'Step not found.');
+  ownProcedure(req.user.id, s.procedure_id);
+  moveStep(s.procedure_id, s.id, req.body?.direction === 'up' ? 'up' : 'down');
+  res.json({ procedure: fullProcedure(s.procedure_id) });
+}));
+
+api.delete('/steps/:sid', requireAuth, wrap(async (req, res) => {
+  const s = db.prepare('SELECT * FROM procedure_steps WHERE id=?').get(+req.params.sid);
+  if (!s) throw httpErr(404, 'Step not found.');
+  ownProcedure(req.user.id, s.procedure_id);
+  db.prepare('DELETE FROM procedure_steps WHERE id=?').run(s.id);
+  resequence(s.procedure_id);
+  res.json({ ok: true });
+}));
+
+/* ---- hotspots: normalised 0..1 against the image ---- */
+api.post('/media/:mid/hotspots', requireAuth, wrap(async (req, res) => {
+  const m = db.prepare('SELECT * FROM procedure_media WHERE id=?').get(+req.params.mid);
+  if (!m) throw httpErr(404, 'Media not found.');
+  ownProcedure(req.user.id, m.procedure_id);
+  const d = pick(req.body || {}, ['step_id', 'number', 'label', 'note', 'component_key', 'x', 'y', 'w', 'h', 'shape']);
+  const inRange = v => typeof v === 'number' && v >= -0.05 && v <= 1.05;
+  if (!inRange(+d.x) || !inRange(+d.y)) throw httpErr(400, 'Hotspot x and y must be normalised 0..1 against the image.');
+  d.media_id = m.id;
+  if (d.number == null) {
+    d.number = (db.prepare('SELECT COALESCE(MAX(number),0) n FROM procedure_hotspots WHERE media_id=?').get(m.id).n) + 1;
+  }
+  res.status(201).json({ hotspot: insert('procedure_hotspots', d) });
+}));
+
+api.patch('/hotspots/:hid', requireAuth, wrap(async (req, res) => {
+  const h = db.prepare('SELECT * FROM procedure_hotspots WHERE id=?').get(+req.params.hid);
+  if (!h) throw httpErr(404, 'Hotspot not found.');
+  const m = db.prepare('SELECT * FROM procedure_media WHERE id=?').get(h.media_id);
+  ownProcedure(req.user.id, m.procedure_id);
+  res.json({ hotspot: update('procedure_hotspots', h.id, pick(req.body || {}, ['step_id', 'number', 'label', 'note', 'component_key', 'x', 'y', 'w', 'h', 'shape'])) });
+}));
+
+api.delete('/hotspots/:hid', requireAuth, wrap(async (req, res) => {
+  const h = db.prepare('SELECT * FROM procedure_hotspots WHERE id=?').get(+req.params.hid);
+  if (!h) throw httpErr(404, 'Hotspot not found.');
+  const m = db.prepare('SELECT * FROM procedure_media WHERE id=?').get(h.media_id);
+  ownProcedure(req.user.id, m.procedure_id);
+  db.prepare('DELETE FROM procedure_hotspots WHERE id=?').run(h.id);
+  res.json({ ok: true });
+}));
+
+/* ---- runs: resumable, because jobs get interrupted ---- */
+api.post('/procedures/:pid/run', requireAuth, wrap(async (req, res) => {
+  const p = ownProcedure(req.user.id, +req.params.pid, false);
+  res.status(201).json({ run: startRun(req.user.id, p.id, p.vehicle_id, req.body?.odometer) });
+}));
+
+api.patch('/runs/:rid', requireAuth, wrap(async (req, res) => {
+  const r = db.prepare('SELECT * FROM procedure_runs WHERE id=?').get(+req.params.rid);
+  if (!r || r.user_id !== req.user.id) throw httpErr(404, 'Run not found.');
+  const run = updateRun(r.id, req.body || {});
+
+  // finishing a run writes the service record, so the job lands in history
+  let record = null;
+  if (req.body?.finish && req.body?.log_service !== false && r.vehicle_id) {
+    const p = db.prepare('SELECT * FROM procedures WHERE id=?').get(r.procedure_id);
+    record = insert('service_records', {
+      vehicle_id: r.vehicle_id, what: p.title, category: p.category || 'repair',
+      date: new Date().toISOString().slice(0, 10),
+      miles: run.odometer ?? null, performer: 'DIY',
+      cost: req.body?.cost ?? p.est_cost ?? 0,
+      notes: `Completed from procedure #${p.id}. ${run.notes || ''}`.trim()
+    });
+    db.prepare('UPDATE procedure_runs SET service_record_id=? WHERE id=?').run(record.id, run.id);
+  }
+  res.json({ run, record });
+}));
+
+/* ---- torque patterns ---- */
+api.get('/torque-patterns', requireAuth, wrap(async (req, res) => {
+  const rows = db.prepare('SELECT * FROM torque_patterns WHERE user_id=? ORDER BY id DESC').all(req.user.id)
+    .map(t => ({ ...t, stages: JSON.parse(t.stages || '[]') }));
+  res.json({ patterns: rows });
+}));
+
+api.post('/torque-patterns', requireAuth, wrap(async (req, res) => {
+  const d = pick(req.body || {}, ['vehicle_id', 'name', 'layout', 'bolt_count', 'rows', 'cols', 'spec', 'stages', 'source', 'note']);
+  if (!d.name || !d.layout || !d.bolt_count) throw httpErr(400, 'A pattern needs a name, a layout and a bolt count.');
+  if (d.bolt_count < 2 || d.bolt_count > 40) throw httpErr(400, 'Bolt count must be between 2 and 40.');
+  if (d.vehicle_id) assertVehicle(req.user.id, +d.vehicle_id, true);
+  if (Array.isArray(d.stages)) d.stages = JSON.stringify(d.stages);
+  d.user_id = req.user.id;
+  const t = insert('torque_patterns', d);
+  res.status(201).json({ pattern: { ...t, stages: JSON.parse(t.stages || '[]') } });
+}));
+
+api.delete('/torque-patterns/:tid', requireAuth, wrap(async (req, res) => {
+  const t = db.prepare('SELECT * FROM torque_patterns WHERE id=? AND user_id=?').get(+req.params.tid, req.user.id);
+  if (!t) throw httpErr(404, 'Not found.');
+  db.prepare('DELETE FROM torque_patterns WHERE id=?').run(t.id);
+  res.json({ ok: true });
+}));
+
+/* ---- companion links for any vehicle + system ---- */
+api.get('/vehicles/:id/companion', requireAuth, wrap(async (req, res) => {
+  const v = assertVehicle(req.user.id, +req.params.id);
+  res.json({
+    links: companionLinks(v, req.query.system, req.query.title),
+    note: 'These open your own subscription or your library account at the right vehicle. Garage never fetches, scrapes or stores their content — the data stays theirs and the tab simply lands where you were already going.'
+  });
 }));
 
 /* ---------- error handler ---------- */

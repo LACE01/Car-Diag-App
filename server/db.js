@@ -533,6 +533,120 @@ const MIGRATIONS = [
       at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     `
+  },
+  {
+    id: '005_procedures',
+    sql: `
+    -- Illustrated, step-by-step procedures the OWNER authors.
+    --
+    -- Deliberately not a copy of anyone's licensed repair database. The
+    -- illustrations are the user's own photographs of their own vehicle,
+    -- which for a specific truck beats generic artwork anyway: it shows
+    -- the bolt they actually have to reach, with the corrosion and the
+    -- aftermarket bracket in the way.
+    --
+    -- Specs transcribed from a source the user legitimately holds
+    -- (Mitchell1 DIY, ALLDATAdiy, a factory manual, a library terminal)
+    -- are stored WITH that source, so provenance travels with the number
+    -- instead of decaying into folklore.
+    CREATE TABLE IF NOT EXISTS procedures (
+      id INTEGER PRIMARY KEY,
+      vehicle_id INTEGER REFERENCES vehicles(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      system TEXT,
+      category TEXT NOT NULL DEFAULT 'repair',
+      difficulty INTEGER,
+      est_minutes INTEGER,
+      est_cost REAL,
+      summary TEXT,
+      safety_flags TEXT,
+      source TEXT,
+      source_ref TEXT,
+      tool_ids TEXT,
+      archived INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS ix_proc_vehicle ON procedures(vehicle_id);
+    CREATE INDEX IF NOT EXISTS ix_proc_user ON procedures(user_id);
+
+    CREATE TABLE IF NOT EXISTS procedure_media (
+      id INTEGER PRIMARY KEY,
+      procedure_id INTEGER NOT NULL REFERENCES procedures(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL DEFAULT 'photo',
+      file_path TEXT, file_name TEXT, file_mime TEXT, file_size INTEGER,
+      svg TEXT,
+      caption TEXT,
+      sort INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS ix_pmedia_proc ON procedure_media(procedure_id, sort);
+
+    CREATE TABLE IF NOT EXISTS procedure_steps (
+      id INTEGER PRIMARY KEY,
+      procedure_id INTEGER NOT NULL REFERENCES procedures(id) ON DELETE CASCADE,
+      seq INTEGER NOT NULL,
+      title TEXT NOT NULL,
+      body TEXT,
+      media_id INTEGER REFERENCES procedure_media(id) ON DELETE SET NULL,
+      torque_value TEXT,
+      torque_pattern_id INTEGER,
+      warning TEXT,
+      tool_ids TEXT,
+      part_note TEXT,
+      is_check INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS ix_pstep_proc ON procedure_steps(procedure_id, seq);
+
+    -- Coordinates are NORMALISED 0..1 against the image, so a hotspot
+    -- survives resizing, re-cropping and any display size.
+    CREATE TABLE IF NOT EXISTS procedure_hotspots (
+      id INTEGER PRIMARY KEY,
+      media_id INTEGER NOT NULL REFERENCES procedure_media(id) ON DELETE CASCADE,
+      step_id INTEGER REFERENCES procedure_steps(id) ON DELETE CASCADE,
+      number INTEGER,
+      label TEXT,
+      note TEXT,
+      component_key TEXT,
+      x REAL NOT NULL, y REAL NOT NULL,
+      w REAL, h REAL,
+      shape TEXT NOT NULL DEFAULT 'pin'
+    );
+    CREATE INDEX IF NOT EXISTS ix_phot_media ON procedure_hotspots(media_id);
+
+    CREATE TABLE IF NOT EXISTS procedure_runs (
+      id INTEGER PRIMARY KEY,
+      procedure_id INTEGER NOT NULL REFERENCES procedures(id) ON DELETE CASCADE,
+      vehicle_id INTEGER REFERENCES vehicles(id) ON DELETE SET NULL,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      started_at TEXT NOT NULL DEFAULT (datetime('now')),
+      finished_at TEXT,
+      odometer INTEGER,
+      done_steps TEXT NOT NULL DEFAULT '[]',
+      notes TEXT,
+      service_record_id INTEGER REFERENCES service_records(id) ON DELETE SET NULL
+    );
+    CREATE INDEX IF NOT EXISTS ix_prun_proc ON procedure_runs(procedure_id);
+
+    -- Tightening patterns. A sequence is geometry, not authorship: a
+    -- centre-out spiral on a ten-bolt head is the same fact whoever prints it.
+    CREATE TABLE IF NOT EXISTS torque_patterns (
+      id INTEGER PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      vehicle_id INTEGER REFERENCES vehicles(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      layout TEXT NOT NULL,
+      bolt_count INTEGER NOT NULL,
+      rows INTEGER, cols INTEGER,
+      spec TEXT,
+      stages TEXT NOT NULL DEFAULT '[]',
+      source TEXT,
+      note TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS ix_tp_user ON torque_patterns(user_id);
+    `
   }
 ];
 

@@ -188,7 +188,7 @@ async function req(method, path, body, form) {
   const assets = {};
   for (const f of ['/css/app.css', '/js/app.js', '/js/diagrams.js', '/js/obd.js', '/js/screens.js',
     '/js/diagnose.js', '/js/kb.js', '/js/icons.js', '/js/ui.js', '/js/parts.js', '/js/services.js',
-    '/js/tools.js']) {
+    '/js/tools.js', '/js/torque.js', '/js/procedures.js']) {
     const res = await fetch(BASE + f);
     ok('asset ' + f, res.status === 200, res.status);
     assets[f] = await res.text();
@@ -315,6 +315,70 @@ async function req(method, path, body, form) {
 
   r = await req('DELETE', `/api/stores/${storeId}`);
   ok('store can be removed', r.status === 200, r.body);
+
+  /* ---- procedures ---- */
+  r = await req('POST', '/api/procedures', {
+    vehicle_id: vid, title: 'Valve cover gaskets', system: 'engine',
+    safety_flags: ['lift', 'fuel'], source: 'Mitchell1 DIY', source_ref: 'Sec 3-14'
+  });
+  ok('procedure created', r.status === 201 && r.body.procedure.title === 'Valve cover gaskets', r.body);
+  const pid = r.body?.procedure?.id;
+  ok('safety flags round-trip as a list', Array.isArray(r.body.procedure.safety_flags) && r.body.procedure.safety_flags.length === 2, r.body.procedure.safety_flags);
+
+  r = await req('POST', '/api/procedures', { title: '' });
+  ok('procedure requires a title', r.status === 400, r.status);
+
+  for (const t of ['Disconnect the batteries', 'Remove the intake', 'Torque the cover']) {
+    await req('POST', `/api/procedures/${pid}/steps`, { title: t, torque_value: '89 lb-in (10 N·m)' });
+  }
+  r = await req('GET', `/api/procedures/${pid}`);
+  ok('steps numbered 1..n in order', r.body.procedure.steps.map(s => s.seq).join(',') === '1,2,3', r.body.procedure.steps.map(s => s.seq));
+  const stepIds = r.body.procedure.steps.map(s => s.id);
+  ok('companion links include a free library option and a paid one',
+    r.body.companion.some(l => !l.paid) && r.body.companion.some(l => l.paid),
+    r.body.companion.map(l => l.label));
+
+  r = await req('POST', `/api/steps/${stepIds[2]}/move`, { direction: 'up' });
+  ok('steps reorder and resequence', r.body.procedure.steps[1].id === stepIds[2], r.body.procedure.steps.map(s => s.id));
+
+  r = await req('POST', `/api/procedures/${pid}/media`, { svg: '<svg/>', kind: 'torque' });
+  ok('generated figure can be attached without a file', r.status === 201, r.body);
+  const mid = r.body?.media?.id;
+
+  r = await req('POST', `/api/media/${mid}/hotspots`, { x: 0.42, y: 0.61, label: 'Rear bolt' });
+  ok('hotspot stored with normalised coordinates', r.status === 201 && r.body.hotspot.x === 0.42, r.body);
+  ok('hotspot auto-numbers', r.body.hotspot.number === 1, r.body.hotspot);
+  r = await req('POST', `/api/media/${mid}/hotspots`, { x: 42, y: 0.6 });
+  ok('out-of-range hotspot rejected', r.status === 400, r.body);
+
+  r = await req('POST', `/api/procedures/${pid}/run`, {});
+  const runId = r.body?.run?.id;
+  ok('run starts', r.status === 201 && r.body.run.resumed === false, r.body);
+  r = await req('POST', `/api/procedures/${pid}/run`, {});
+  ok('a second start resumes the open run rather than duplicating', r.body.run.resumed === true && r.body.run.id === runId, r.body.run);
+
+  r = await req('PATCH', `/api/runs/${runId}`, { done: stepIds.slice(0, 2) });
+  ok('progress saves mid-job', r.body.run.done_steps.length === 2, r.body.run);
+  r = await req('PATCH', `/api/runs/${runId}`, { done: stepIds, finish: true });
+  ok('finishing writes a service record', !!r.body.record && r.body.record.what === 'Valve cover gaskets', r.body.record);
+
+  r = await req('POST', '/api/torque-patterns', {
+    vehicle_id: vid, name: 'Valve cover', layout: 'rect', bolt_count: 12,
+    stages: [{ label: 'Final', value: 89, unit: 'lb-in' }], source: 'Mitchell1 DIY'
+  });
+  ok('torque pattern saved with stages', r.status === 201 && r.body.pattern.stages[0].value === 89, r.body);
+  r = await req('POST', '/api/torque-patterns', { name: 'x', layout: 'rect', bolt_count: 999 });
+  ok('absurd bolt count rejected', r.status === 400, r.status);
+
+  // another account must not see this procedure
+  const keep = cookie; cookie = '';
+  await req('POST', '/api/auth/register', { email: `nosy${Date.now()}@example.com`, name: 'Nosy', password: 'correct-horse-battery' });
+  r = await req('GET', `/api/procedures/${pid}`);
+  ok('another account cannot open the procedure', r.status === 404, r.status);
+  cookie = keep;
+
+  ok('torque generator ships to the client', /function circularOrder/.test(assets['/js/torque.js'] || ''));
+  ok('player and hotspot editor ship', /function playProcedure/.test(assets['/js/procedures.js'] || '') && /bindHotspotStage/.test(assets['/js/procedures.js'] || ''));
 
   console.log(`\n${pass} passed, ${fail} failed\n`);
   process.exit(fail ? 1 : 0);

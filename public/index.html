@@ -38,6 +38,7 @@
       <a href="#money"      data-go="money"       data-ic="money">Fuel &amp; money</a>
       <a href="#ownership"  data-go="ownership"   data-ic="shield">Ownership &amp; docs</a>
       <a href="#wear"       data-go="wear"        data-ic="tire">Tires, brakes, battery</a>
+      <a href="#procedures" data-go="procedures"  data-ic="clipboard">Procedures</a>
       <a href="#parts"      data-go="parts"       data-ic="hex">Find parts</a>
       <a href="#records"    data-go="records"     data-ic="clipboard">Records &amp; reports</a>
       <div class="spacer"></div>
@@ -94,6 +95,7 @@
         <section class="screen" id="s-money"></section>
         <section class="screen" id="s-ownership"></section>
         <section class="screen" id="s-wear"></section>
+        <section class="screen" id="s-procedures"></section>
         <section class="screen" id="s-parts"></section>
         <section class="screen" id="s-records"></section>
       </div>
@@ -115,6 +117,9 @@
   </aside>
 
   <div class="modal" id="modal"><div class="mbox" id="mbox"></div></div>
+
+  <!-- full-screen step player: gloves on, screen awake, one thing at a time -->
+  <div id="player" class="hide"></div>
 </div>
 
 <script src="/js/icons.js"></script>
@@ -123,10 +128,12 @@
 <script src="/js/obd.js"></script>
 <script src="/js/services.js"></script>
 <script src="/js/tools.js"></script>
+<script src="/js/torque.js"></script>
 <script src="/js/app.js"></script>
 <script src="/js/screens.js"></script>
 <script src="/js/parts.js"></script>
 <script src="/js/diagrams.js"></script>
+<script src="/js/procedures.js"></script>
 <script src="/js/diagnose.js"></script>
 </body>
 </html>

@@ -110,7 +110,7 @@ const TITLES = {
   garage: 'My Garage', vehicle: 'Vehicle Health', maintenance: 'Maintenance',
   diagnose: 'Diagnose', systems: 'Systems & Diagrams', money: 'Fuel & Money',
   ownership: 'Ownership & Documents', wear: 'Tires, Brakes & Battery',
-  parts: 'Find Parts', records: 'Records & Reports'
+  procedures: 'Procedures', parts: 'Find Parts', records: 'Records & Reports'
 };
 const renderers = {};
 
@@ -158,7 +158,7 @@ async function setActive(id) {
   state.activeId = id;
   localStorage.setItem('garage.activeId', id);
   state.detail = null;
-  VH.id = null; EPA.id = null; VCONF.loaded = false;   // per-vehicle caches
+  VH.id = null; EPA.id = null; VCONF.loaded = false; PROCS.loaded = false;   // per-vehicle caches
   await loadDetail();
   renderNav();
   if (renderers[state.screen]) renderers[state.screen]();
@@ -757,7 +757,16 @@ async function boot() {
   document.getElementById('brandmark').innerHTML = ic('wrench', 20);
   document.getElementById('burgerbtn').innerHTML = ic('menu', 22);
   document.getElementById('navveh').addEventListener('change', e => setActive(+e.target.value));
-  document.addEventListener('keydown', e => { if (e.key === 'Escape') { menu(false); closeInsp(); closeModal(); } });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { menu(false); closeInsp(); closeModal(); }
+    // the player is a keyboard-friendly place to be: arrows advance, space ticks
+    const playing = !document.getElementById('player').classList.contains('hide');
+    if (!playing) return;
+    if (e.key === 'ArrowRight') stepBy(1);
+    if (e.key === 'ArrowLeft') stepBy(-1);
+    if (e.key === ' ') { e.preventDefault(); toggleStepDone(); }
+    if (e.key === 'Escape') exitPlayer();
+  });
   document.getElementById('modal').addEventListener('click', e => { if (e.target.id === 'modal') closeModal(); });
 
   try {
