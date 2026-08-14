@@ -40,6 +40,8 @@
       <a href="#wear"       data-go="wear"        data-ic="tire">Tires, brakes, battery</a>
       <a href="#procedures" data-go="procedures"  data-ic="clipboard">Procedures</a>
       <a href="#parts"      data-go="parts"       data-ic="hex">Find parts</a>
+      <a href="#analytics"  data-go="analytics"   data-ic="chart">Analytics</a>
+      <a href="#timeline"   data-go="timeline"    data-ic="clipboard">Timeline</a>
       <a href="#records"    data-go="records"     data-ic="clipboard">Records &amp; reports</a>
       <div class="spacer"></div>
       <div class="foot">
@@ -55,8 +57,15 @@
     <div class="main">
       <header class="topbar">
         <button class="burger" onclick="menu(true)" id="burgerbtn" aria-label="Menu"></button>
-        <div class="title" id="ttl">My Garage</div>
-        <div class="avatar" onclick="accountSheet()" title="Account">··</div>
+        <div class="row" style="gap:12px;min-width:0">
+          <div class="title" id="ttl">My Garage</div>
+          <button class="savepill hide" id="savepill" onclick="syncHistory()" title="Save and sync state"></button>
+        </div>
+        <div class="row" style="gap:8px">
+          <button class="btn xs ghost" onclick="openPalette()" title="Search (Ctrl/Cmd + K)">
+            SEARCH <span class="mono" style="opacity:.7">⌘K</span></button>
+          <div class="avatar" onclick="accountSheet()" title="Account">··</div>
+        </div>
       </header>
 
       <div class="page">
@@ -97,6 +106,8 @@
         <section class="screen" id="s-wear"></section>
         <section class="screen" id="s-procedures"></section>
         <section class="screen" id="s-parts"></section>
+        <section class="screen" id="s-analytics"></section>
+        <section class="screen" id="s-timeline"></section>
         <section class="screen" id="s-records"></section>
       </div>
     </div>
@@ -123,6 +134,7 @@
 </div>
 
 <script src="/js/icons.js"></script>
+<script src="/js/charts.js"></script>
 <script src="/js/vehicle-art.js"></script>
 <script src="/js/ui.js"></script>
 <script src="/js/kb.js"></script>
@@ -135,6 +147,10 @@
 <script src="/js/parts.js"></script>
 <script src="/js/diagrams.js"></script>
 <script src="/js/procedures.js"></script>
+<script src="/js/records-ui.js"></script>
+<script src="/js/analytics-ui.js"></script>
+<script src="/js/wear-viz.js"></script>
+<script src="/js/live-viz.js"></script>
 <script src="/js/diagnose.js"></script>
 </body>
 </html>

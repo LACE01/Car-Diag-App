@@ -110,7 +110,8 @@ const TITLES = {
   garage: 'My Garage', vehicle: 'Vehicle Health', maintenance: 'Maintenance',
   diagnose: 'Diagnose', systems: 'Systems & Diagrams', money: 'Fuel & Money',
   ownership: 'Ownership & Documents', wear: 'Tires, Brakes & Battery',
-  procedures: 'Procedures', parts: 'Find Parts', records: 'Records & Reports'
+  procedures: 'Procedures', parts: 'Find Parts', analytics: 'Analytics', timeline: 'Vehicle Timeline',
+  records: 'Records & Reports'
 };
 const renderers = {};
 
@@ -160,7 +161,7 @@ async function setActive(id) {
   state.activeId = id;
   localStorage.setItem('garage.activeId', id);
   state.detail = null;
-  VH.id = null; EPA.id = null; VCONF.loaded = false; PROCS.loaded = false;   // per-vehicle caches
+  VH.id = null; EPA.id = null; VCONF.loaded = false; PROCS.loaded = false; TL.loaded = false; AN.data = null;   // per-vehicle caches
   await loadDetail();
   renderNav();
   if (renderers[state.screen]) renderers[state.screen]();
@@ -384,16 +385,23 @@ function renderGarage() {
       ? '<span class="chip bad"><span class="dot"></span>' + rc + ' recall' + (rc > 1 ? 's' : '') + '</span>'
       : od ? '<span class="chip warn"><span class="dot"></span>' + od + ' overdue</span>'
         : '<span class="chip ok"><span class="dot"></span>All clear</span>';
-    return '<div class="veh"><div class="hero" onclick="setActive(' + v.id + ').then(()=>go(\'vehicle\'))">' +
-      vart(artFor(v), 128, 'stroke-width="1.3"') + '<div style="position:absolute;top:12px;right:12px">' + badge + '</div>' +
+    return '<div class="veh"><div class="hero' + (v.photo ? ' has-photo' : '') + '" onclick="setActive(' + v.id + ').then(()=>go(\'vehicle\'))">' +
+      (v.photo
+        ? '<img src="/api/photo/' + encodeURIComponent(v.photo) + '" alt="" loading="lazy"><div class="hero-grad"></div>'
+        : vart(artFor(v), 128, 'stroke-width="1.3"')) +
+      '<button class="hero-cam" onclick="event.stopPropagation();vehiclePhotos(' + v.id + ')" title="Vehicle photo">' + ic('garage', 15) + '</button>' +
+      '<div style="position:absolute;top:12px;right:12px">' + badge + '</div>' +
       '<button class="x" onclick="removeVehicle(' + v.id + ',event)" title="Remove">&times;</button></div>' +
       '<div class="body"><h3 onclick="setActive(' + v.id + ').then(()=>go(\'vehicle\'))">' + esc(v.nickname || vLabel(v)) + '</h3>' +
       '<div class="sub">' + (esc([v.trim, v.engine, String(v.drive || '').split('/')[0]].filter(Boolean).join(' · ')) || 'Decode a VIN for full specs') +
       (v.duty === 'severe' ? ' · <b style="color:var(--warn)">severe duty</b>' : '') + '</div>' +
       '<div class="stats"><div><span class="mlabel">Odometer</span><div class="field mono" style="cursor:pointer" onclick="logOdometer(' + v.id + ',event)">' +
       (v.mileage ? dist(v.mileage) : '<small style="font-family:Inter">Tap to log</small>') + '</div></div>' +
-      '<div><span class="mlabel">Economy</span><div class="field mono">' +
-      (v.economy ? v.economy + ' <small style="font-family:Inter">' + v.economy_unit + '</small>' : '<small style="font-family:Inter">Log fuel</small>') + '</div></div>' +
+      '<div><span class="mlabel">Economy</span>' +
+      (v.economy
+        ? '<div class="field mono">' + v.economy + ' <small style="font-family:Inter">' + v.economy_unit + '</small></div>'
+        : '<button class="btn xs block" style="min-height:38px" onclick="event.stopPropagation();setActive(' + v.id + ').then(addFuel)">+ LOG FUEL</button>') +
+      '</div>' +
       '</div></div></div>';
   }).join('') +
     '<div class="addveh" onclick="openAdd()"><div>' + ic('plus', 26) +
@@ -418,8 +426,12 @@ function renderAlerts() {
   a.innerHTML = '<h3 class="sec-h">Notification board <span class="chip ' + (state.alerts.some(x => x.level === 'bad') ? 'bad' : 'warn') + '">' + state.alerts.length + '</span>' +
     '<span class="src">Live · NHTSA + your records</span></h3><div class="card">' +
     state.alerts.slice(0, 30).map(x => {
-      const c = cols[x.level] || cols.warn;
-      return '<div class="rowitem"><div class="ico" style="background:' + c[0] + ';color:' + c[1] + '">' + ic(icons[x.kind] || 'alert', 20) + '</div>' +
+      /* LEVEL_STYLE is the single source for severity styling. This line
+         previously referenced an undefined `cols`, which threw and blanked
+         the entire notification board — but only once there was something
+         to notify about, so an empty garage looked perfectly fine. */
+      const st = LEVEL_STYLE[x.level] || LEVEL_STYLE.info;
+      return '<div class="rowitem"><div class="ico ' + st[0] + '">' + ic(icons[x.kind] || 'alert', 20) + '</div>' +
         '<div class="txt"><b>' + esc(x.title) + '</b><span>' + esc(x.body || '') + (x.action ? ' — ' + esc(x.action) : '') + '</span>' +
         '<span style="font-size:11px;opacity:.75">' + esc(x.vehicle) + '</span></div>' +
         '<button class="btn xs ghost" onclick=\'openAlert(' + JSON.stringify(JSON.stringify(x)) + ')\'>Open</button></div>';
@@ -584,7 +596,10 @@ function renderVehicle() {
   const openDtc = (d.dtcs || []).filter(t => !t.cleared_at);
 
   el.innerHTML =
-    '<div class="stage"><div class="art">' + vart(artFor(v), 300, 'stroke-width="1.1"') +
+    '<div class="stage"><div class="art' + (v.photo ? ' has-photo' : '') + '">' +
+    (v.photo ? '<img src="/api/photo/' + encodeURIComponent(v.photo) + '" alt=""><div class="hero-grad"></div>'
+      : vart(artFor(v), 300, 'stroke-width="1.1"')) +
+    '<button class="hero-cam" onclick="vehiclePhotos(' + v.id + ')" title="Vehicle photos">' + ic('garage', 16) + '</button>' +
     (v.vin ? '<span class="chip mono" style="position:absolute;top:16px;left:16px">' + esc(v.vin) + '</span>' : '') +
     '<span class="chip ' + (openR.length ? 'bad' : 'ok') + '" style="position:absolute;top:16px;right:16px"><span class="dot"></span>' +
     (openR.length ? openR.length + ' open recall' + (openR.length > 1 ? 's' : '') : 'No open recalls') + '</span></div>' +
@@ -595,7 +610,9 @@ function renderVehicle() {
     '<div class="grid g4" style="gap:14px;margin-bottom:20px">' +
     fld('Odometer', '<div class="field mono" style="cursor:pointer" onclick="logOdometer(' + v.id + ')">' + (v.mileage ? dist(v.mileage) : 'Log') + ' <small style="font-family:Inter">' + distUnit() + '</small></div>') +
     fld('Duty cycle', '<div class="field" style="cursor:pointer" onclick="toggleDuty()"><small>' + (v.duty === 'severe' ? 'Severe' : 'Normal') + ' — tap to change</small></div>') +
-    fld('Economy', '<div class="field mono">' + (d.economy?.average ? d.economy.average + ' <small style="font-family:Inter">' + d.economy.unit + '</small>' : '<small style="font-family:Inter">Log fuel</small>') + '</div>') +
+    fld('Economy', d.economy?.average
+      ? '<div class="field mono">' + d.economy.average + ' <small style="font-family:Inter">' + d.economy.unit + '</small></div>'
+      : '<button class="btn xs block" style="min-height:40px" onclick="addFuel()">+ LOG FUEL</button>') +
     fld('Cost per mile', '<div class="field mono">' + (d.tco?.costPerMile ? money(d.tco.costPerMile, 3) : '<small style="font-family:Inter">—</small>') + '</div>') +
     '</div>' +
     '<div class="row wrap" style="gap:10px"><button class="btn" style="flex:1;min-width:180px" onclick="go(\'diagnose\')">Start diagnostic scan</button>' +

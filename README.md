@@ -43,6 +43,24 @@ fuel economy, DTC decode and clear tracking, wear analysis, cost of ownership, a
 
 ---
 
+### Tests
+
+```bash
+npm test              # lint, torque, charts, analytics, render, smoke
+npm run test:render   # boots the real page in jsdom, walks every screen
+npm run smoke -- http://192.168.1.50:2026   # against a running container
+```
+
+`npm test` needs no running server — every suite that needs one starts a throwaway on a scratch
+database and tears it down. The render test needs `jsdom` (a dev dependency, excluded from the
+image); without it, it skips rather than fails.
+
+The render test exists because the two worst bugs in this project were invisible to data tests: a
+body class that collided with `.modal{display:none}` and blanked the entire application, and
+inline handlers calling functions that had been renamed. Both left a perfectly healthy API and a
+dead page. It loads `index.html`, injects every real script, signs in against a real server, walks
+each screen and asserts that markup appeared with no `NaN` in it.
+
 ## What is in it
 
 ### Garage & vehicles
@@ -228,6 +246,42 @@ Full JSON export of everything, always available. Data portability is not a feat
 
 ---
 
+## Charts, and the rule behind them
+
+The analytics screen draws from your records and nothing else. There is no seeded demo data, no
+interpolation to make a line continuous, and no forecast that is not labelled as one.
+
+Four decisions are worth knowing about, because they cost something and were made deliberately:
+
+**No charting library.** `charts.js` is hand-rolled SVG. The app has to work on a phone in a
+garage with no signal, and a CDN is one more thing that can be unavailable at the worst moment.
+
+**Monotone interpolation, not splines.** A plain cubic spline overshoots between data points. On a
+fuel-economy chart that draws an MPG figure the vehicle never achieved; on an odometer chart it
+can draw a dip that reads as a rollback. Monotone cubic interpolation is mathematically incapable
+of leaving the range of its endpoints, and `charts.test.mjs` samples the curve between points to
+prove the implementation actually has that property.
+
+**No vehicle health score.** The gauges measure how complete *your records* are, and say so. A
+single number purporting to describe a vehicle's condition would need inspection data the app
+does not have. Related: a newly added vehicle reports **no** maintenance compliance figure rather
+than 100%, because seeding the schedule stamps "last done today" — counting that as compliance
+would be a green invented by the app about work nobody has done. Log one item and the number
+starts meaning something.
+
+**Implausible figures are flagged, never dropped or corrected.** A tank-to-tank calculation
+outside a physics band (under 4 mpg, over 120) almost always means a missed fill-up or a typo. The
+point is still plotted and still counted — it is marked `NEEDS VERIFICATION` with the likely cause
+named. Dropping it would quietly rewrite your history; hiding it would let one typo drag the
+average somewhere meaningless. Odometer readings lower than an earlier one get the same treatment.
+
+Where a figure is derived rather than recorded it carries a source chip — `USER ENTERED`,
+`IMPORTED`, `MANUAL VERIFIED`, `MANUFACTURER SPEC`, `CALCULATED`, `NHTSA REFERENCE`,
+`NEEDS VERIFICATION` — and states its own basis in the panel footer.
+
+Every chart is keyboard-reachable, carries an accessible summary, exposes a `DATA` button that
+renders the same numbers as a table, and honours `prefers-reduced-motion`.
+
 ## Standards
 
 No emoji, no generic app icons. Every symbol conforms to a published standard, so a technician
@@ -296,10 +350,25 @@ public/
   js/screens.js maintenance, money, ownership, wear, parts, records, reports
   js/diagrams.js systems, the five figures, symbol legend, component inspector
   js/diagnose.js the scanner screen
-test/smoke.mjs end-to-end assertions
+  js/charts.js   the telemetry drawing kit — line, gauge, donut, sparkline
+  js/analytics-ui.js  the analytics dashboard
+  js/wear-viz.js four-corner tires, brake meters, battery panel
+  js/live-viz.js live-data trace viewer with zoom and annotations
+  js/records-ui.js auto-save, torque module, timeline, command palette
+server/
+  analytics.js series builders — cost, fuel, odometer, spend, horizon, gauges
+  records.js   torque specs, timeline, global search
+test/
+  lint.mjs     six static checks, each mapped to a bug that already shipped
+  torque.test.mjs   tightening sequences against printed patterns
+  charts.test.mjs   interpolation, downsampling, tick maths
+  analytics.test.mjs  what the API refuses to claim
+  render.test.mjs   boots the real page in jsdom and walks every screen
+  smoke.mjs    end-to-end assertions (spawns its own server if none is given)
 ```
 
-`core.js` has no I/O, no express and no sqlite — it is the `packages/core` of the original
+`analytics.js` sits beside `core.js`: it reads the database but makes no claim the records do not
+support. `core.js` has no I/O, no express and no sqlite — it is the `packages/core` of the original
 framework spec, and it is what the smoke test exercises hardest.
 
 Two rules the schema enforces: every user-owned row carries `updated_at` and `device_id` so a

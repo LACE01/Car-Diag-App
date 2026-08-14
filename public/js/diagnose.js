@@ -102,11 +102,21 @@ function renderDiagnose() {
     '<button class="btn sm ghost" onclick="showDriveCycle()">Open the drive cycle</button></div>' +
 
     /* sessions */
+    /* the trace viewer renders here when a session is opened */
+    '<div id="livebox"></div>' +
+
     (d.sessions?.length ? '<h3 class="sec-h">Session history</h3><div class="card">' +
-      d.sessions.map(s => '<div class="rowitem"><div class="ico">' + ic('dlc', 19) + '</div>' +
+      d.sessions.map(s => '<div class="rowitem tapme" tabindex="0" role="button" ' +
+        'onclick="openSession(' + s.id + ')" onkeydown="if(event.key===\'Enter\'){openSession(' + s.id + ')}">' +
+        '<div class="ico">' + ic('chart', 19) + '</div>' +
         '<div class="txt"><b>' + esc(s.adapter || 'Session') + '</b><span>' + dateShort(s.started_at) +
         (s.protocol ? ' · ' + esc(s.protocol) : '') + (s.odometer ? ' · ' + num(s.odometer) + ' mi' : '') +
-        (s.imported_from ? ' · imported from ' + esc(s.imported_from) : '') + '</span></div></div>').join('') + '</div>' : '');
+        (s.imported_from ? ' · imported from ' + esc(s.imported_from) : '') + '</span></div>' +
+        '<span class="mono" style="font-size:10px;color:var(--primary);letter-spacing:.1em">OPEN</span></div>').join('') +
+      '</div>' : '');
+
+  /* reopening the screen should not silently drop the trace you were reading */
+  if (LIVE.session && LIVE.id) drawSession();
 
   if (liveTimer) renderLivePane();
 }

@@ -142,8 +142,13 @@ function inp(id, opts) {
     (o.step ? ' step="' + o.step + '"' : '') +
     (o.min != null ? ' min="' + o.min + '"' : '') + '>';
 }
-function sel(id, options, value) {
-  return '<select class="inp" id="' + id + '">' + options.map(o => {
+function sel(id, options, value, extra) {
+  /* `extra` is an optional attribute bag — { onchange, cls, aria } —
+     added late so existing three-argument calls keep working. */
+  const x = extra || {};
+  return '<select class="inp ' + (x.cls || '') + '" id="' + id + '"' +
+    (x.onchange ? ' onchange="' + x.onchange + '"' : '') +
+    (x.aria ? ' aria-label="' + esc(x.aria) + '"' : '') + '>' + options.map(o => {
     const val = Array.isArray(o) ? o[0] : o, lab = Array.isArray(o) ? o[1] : o;
     return '<option value="' + esc(val) + '"' + (String(val) === String(value) ? ' selected' : '') + '>' + esc(lab) + '</option>';
   }).join('') + '</select>';

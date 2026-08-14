@@ -25,6 +25,11 @@ import {
   ownProcedure, fullProcedure, listProcedures, resequence, moveStep,
   startRun, updateRun, companionLinks
 } from './procedures.js';
+import {
+  TORQUE_SOURCES, torqueDisplay, decorateTorque, torqueFor, assertTorqueOwner,
+  timelineFor, searchAll
+} from './records.js';
+import * as analytics from './analytics.js';
 import * as core from './core.js';
 
 export const api = express.Router();
@@ -139,6 +144,7 @@ api.get('/vehicles', requireAuth, wrap(async (req, res) => {
   for (const v of rows) {
     v.open_recalls = db.prepare('SELECT COUNT(*) c FROM recall_status WHERE vehicle_id=? AND completed=0 AND dismissed=0').get(v.id).c;
     v.due = dueSummary(v);
+    v.photo = primaryPhoto(v.id);
   }
   res.json({ vehicles: rows });
 }));
@@ -222,6 +228,11 @@ api.post('/vehicles/:id/refresh', requireAuth, wrap(async (req, res) => {
 }));
 
 /* ---- vehicle detail assembly ---- */
+function primaryPhoto(vehicleId) {
+  const p = db.prepare('SELECT file_path FROM vehicle_photos WHERE vehicle_id=? ORDER BY is_primary DESC, id DESC LIMIT 1').get(vehicleId);
+  return p ? p.file_path : null;
+}
+
 function vehicleDetail(v) {
   const service = db.prepare('SELECT * FROM service_records WHERE vehicle_id=? ORDER BY date DESC, id DESC').all(v.id);
   const fuel = db.prepare('SELECT * FROM fuel_logs WHERE vehicle_id=? ORDER BY odometer').all(v.id);
@@ -247,8 +258,10 @@ function vehicleDetail(v) {
   const tco = core.costOfOwnership({ vehicle: v, service, fuel, expenses });
   const fc = core.forecast12(db.prepare('SELECT * FROM reminders WHERE vehicle_id=? AND active=1').all(v.id), v);
 
+  v.photo = primaryPhoto(v.id);
   return {
     vehicle: v,
+    photos: db.prepare('SELECT * FROM vehicle_photos WHERE vehicle_id=? ORDER BY is_primary DESC, id DESC').all(v.id),
     reminders: reminders.sort((a, b) => b.pct - a.pct),
     warranties, documents, recalls, complaints, odometer,
     service, fuel, expenses, trips, tires, battery, brakes, brakeRows,
@@ -405,14 +418,14 @@ api.get('/vehicles/:id/odometer', requireAuth, wrap(async (req, res) => {
    GENERIC CHILD COLLECTIONS
    ============================================================ */
 const COLLECTIONS = {
-  service: { table: 'service_records', order: 'date DESC, id DESC', fields: ['what', 'category', 'date', 'miles', 'performer', 'shop_name', 'labor_hours', 'parts_cost', 'labor_cost', 'cost', 'parts_json', 'notes', 'warranty_claim'] },
+  service: { table: 'service_records', order: 'date DESC, id DESC', fields: ['what', 'category', 'system', 'date', 'miles', 'performer', 'shop_name', 'labor_hours', 'parts_cost', 'labor_cost', 'cost', 'parts_json', 'notes', 'warranty_claim'] },
   fuel: { table: 'fuel_logs', order: 'odometer DESC, date DESC', fields: ['date', 'odometer', 'kind', 'quantity', 'price_per_unit', 'total', 'partial', 'missed_fill', 'station', 'charge_kind', 'octane', 'note'] },
   expenses: { table: 'expenses', order: 'date DESC', fields: ['date', 'category', 'amount', 'vendor', 'note'] },
   trips: { table: 'trips', order: 'date DESC', fields: ['date', 'miles', 'purpose', 'from_place', 'to_place', 'note', 'rate'] },
   warranties: { table: 'warranties', order: 'id', fields: ['kind', 'label', 'months', 'miles', 'start_date', 'start_miles', 'provider', 'contract_number', 'deductible', 'note'] },
   documents: { table: 'documents', order: "COALESCE(expires_date,'9999')", fields: ['kind', 'title', 'issuer', 'number', 'issued_date', 'expires_date', 'amount', 'note'] },
   tires: { table: 'tire_sets', order: 'active DESC, id DESC', fields: ['name', 'brand', 'model', 'size', 'season', 'dot_date', 'installed_date', 'installed_miles', 'removed_date', 'removed_miles', 'new_tread_32', 'rotation_pattern', 'tpms_ids', 'cost', 'active'] },
-  battery: { table: 'battery_records', order: 'id DESC', fields: ['installed_date', 'group_size', 'cca', 'brand', 'test_date', 'rest_voltage', 'cranking_voltage', 'measured_cca', 'load_test', 'note'] },
+  battery: { table: 'battery_records', order: 'id DESC', fields: ['installed_date', 'group_size', 'cca', 'brand', 'test_date', 'rest_voltage', 'cranking_voltage', 'measured_cca', 'load_test', 'note', 'warranty_months', 'warranty_prorata_months'] },
   brakes: { table: 'brake_measurements', order: 'date DESC', fields: ['date', 'odometer', 'lf_pad', 'rf_pad', 'lr_pad', 'rr_pad', 'lf_rotor', 'rf_rotor', 'lr_rotor', 'rr_rotor', 'fluid_moisture', 'note'] }
 };
 
@@ -535,13 +548,14 @@ api.post('/reminders/:rid/done', requireAuth, wrap(async (req, res) => {
   const v = db.prepare('SELECT * FROM vehicles WHERE id=?').get(r.vehicle_id);
   const miles = req.body?.miles ?? v.mileage;
   const date = req.body?.date ?? new Date().toISOString().slice(0, 10);
-  db.prepare('UPDATE reminders SET last_done_miles=?, last_done_date=?, updated_at=? WHERE id=?')
+  /* Logging the job is what turns an assumed baseline into a real one. */
+  db.prepare("UPDATE reminders SET last_done_miles=?, last_done_date=?, baseline='confirmed', updated_at=? WHERE id=?")
     .run(miles, date, new Date().toISOString(), r.id);
 
   let record = null;
   if (req.body?.log_service !== false) {
     record = insert('service_records', {
-      vehicle_id: v.id, what: r.name, category: 'maintenance', date, miles,
+      vehicle_id: v.id, what: r.name, category: 'maintenance', system: r.system || null, date, miles,
       performer: req.body?.performer || 'DIY', cost: req.body?.cost ?? 0,
       notes: 'Logged from the maintenance schedule'
     });
@@ -840,6 +854,7 @@ api.get('/dashboard', requireAuth, wrap(async (req, res) => {
     v.economy_unit = d.economy.unit;
     v.cost_per_mile = d.tco.costPerMile;
     v.due = { overdue: d.reminders.filter(r => r.overdue).length, soon: d.reminders.filter(r => !r.overdue && r.cls === 'warn').length };
+    v.photo = primaryPhoto(v.id);
     alerts = alerts.concat(d.alerts);
   }
   const rank = { bad: 0, warn: 1, ok: 2 };
@@ -1594,7 +1609,7 @@ api.patch('/runs/:rid', requireAuth, wrap(async (req, res) => {
   if (req.body?.finish && req.body?.log_service !== false && r.vehicle_id) {
     const p = db.prepare('SELECT * FROM procedures WHERE id=?').get(r.procedure_id);
     record = insert('service_records', {
-      vehicle_id: r.vehicle_id, what: p.title, category: p.category || 'repair',
+      vehicle_id: r.vehicle_id, what: p.title, category: p.category || 'repair', system: p.system || null,
       date: new Date().toISOString().slice(0, 10),
       miles: run.odometer ?? null, performer: 'DIY',
       cost: req.body?.cost ?? p.est_cost ?? 0,
@@ -1637,6 +1652,228 @@ api.get('/vehicles/:id/companion', requireAuth, wrap(async (req, res) => {
     links: companionLinks(v, req.query.system, req.query.title),
     note: 'These open your own subscription or your library account at the right vehicle. Garage never fetches, scrapes or stores their content — the data stays theirs and the tab simply lands where you were already going.'
   });
+}));
+
+/* ============================================================
+   TORQUE SPECIFICATIONS — sourced, verifiable, never invented
+   ============================================================ */
+const TORQUE_FIELDS = ['vehicle_id', 'scope_kind', 'scope_id', 'component', 'value', 'source_unit',
+  'angle', 'sequence_note', 'source', 'source_ref', 'verification', 'note'];
+
+api.get('/torque', requireAuth, wrap(async (req, res) => {
+  const { scope_kind, scope_id } = req.query;
+  if (scope_kind && scope_id) return res.json({ specs: torqueFor(scope_kind, +scope_id) });
+  const vid = req.query.vehicle_id ? +req.query.vehicle_id : null;
+  if (vid) assertVehicle(req.user.id, vid);
+  const rows = vid
+    ? db.prepare('SELECT * FROM torque_specs WHERE vehicle_id=? ORDER BY id DESC').all(vid)
+    : db.prepare('SELECT * FROM torque_specs WHERE user_id=? ORDER BY id DESC LIMIT 200').all(req.user.id);
+  res.json({ specs: rows.map(decorateTorque), sources: TORQUE_SOURCES });
+}));
+
+api.post('/torque', requireAuth, wrap(async (req, res) => {
+  const d = pick(req.body || {}, TORQUE_FIELDS);
+  if (!d.component) throw httpErr(400, 'A torque spec needs a component or fastener name.');
+  if (!d.scope_kind) d.scope_kind = 'component';
+  if (d.vehicle_id) assertVehicle(req.user.id, +d.vehicle_id, true);
+  if (d.value != null && !(Number(d.value) > 0)) throw httpErr(400, 'A torque value must be a positive number, or left empty until you have one.');
+  if (d.source && !TORQUE_SOURCES[d.source]) throw httpErr(400, 'source must be one of: ' + Object.keys(TORQUE_SOURCES).join(', '));
+
+  // verification follows from the source, unless explicitly downgraded
+  if (!d.verification) {
+    d.verification = TORQUE_SOURCES[d.source || 'user_entered'].verified ? 'verified' : 'needs_verification';
+  }
+  d.user_id = req.user.id;
+  const s = insert('torque_specs', d);
+  audit(req.user.id, d.vehicle_id, 'torque.create', d.component);
+  res.status(201).json({ spec: decorateTorque(s) });
+}));
+
+api.patch('/torque/:tid', requireAuth, wrap(async (req, res) => {
+  const s = assertTorqueOwner(req.user.id, +req.params.tid);
+  const d = pick(req.body || {}, TORQUE_FIELDS);
+  if (d.source && !TORQUE_SOURCES[d.source]) throw httpErr(400, 'Unknown source.');
+  if (d.source && req.body.verification === undefined) {
+    d.verification = TORQUE_SOURCES[d.source].verified ? 'verified' : 'needs_verification';
+  }
+  d.updated_at = new Date().toISOString();
+  res.json({ spec: decorateTorque(update('torque_specs', s.id, d)) });
+}));
+
+/**
+ * Confirming you actually torqued a fastener is a separate act from
+ * recording what the spec is — and it is refused outright if there is
+ * no value on file, because "confirmed" against nothing is worse than
+ * no record at all.
+ */
+api.post('/torque/:tid/confirm', requireAuth, wrap(async (req, res) => {
+  const s = assertTorqueOwner(req.user.id, +req.params.tid);
+  if (s.value == null) {
+    throw httpErr(409, 'NO VERIFIED TORQUE SPEC ON FILE. Add a specification from the service manual before confirming this step.');
+  }
+  const disp = torqueDisplay(s);
+  const d = req.body?.undo
+    ? { confirmed_at: null, confirmed_by: null, confirmed_value: null }
+    : {
+      confirmed_at: new Date().toISOString(),
+      confirmed_by: req.user.name || req.user.email,
+      confirmed_value: req.body?.confirmed_value || disp.primary
+    };
+  audit(req.user.id, s.vehicle_id, req.body?.undo ? 'torque.unconfirm' : 'torque.confirm', s.component);
+  res.json({
+    spec: decorateTorque(update('torque_specs', s.id, d)),
+    note: req.body?.undo ? 'Confirmation cleared.'
+      : 'Recorded as torqued to ' + disp.primary + ' (' + disp.secondary + '), source ' +
+      (TORQUE_SOURCES[s.source] || {}).label + '.'
+  });
+}));
+
+api.post('/torque/:tid/photo', requireAuth, upload.single('file'), wrap(async (req, res) => {
+  const s = assertTorqueOwner(req.user.id, +req.params.tid);
+  if (!req.file) throw httpErr(400, 'No file received.');
+  res.json({ spec: decorateTorque(update('torque_specs', s.id, { photo_path: path.basename(req.file.path) })) });
+}));
+
+api.delete('/torque/:tid', requireAuth, wrap(async (req, res) => {
+  const s = assertTorqueOwner(req.user.id, +req.params.tid);
+  db.prepare('DELETE FROM torque_specs WHERE id=?').run(s.id);
+  res.json({ ok: true });
+}));
+
+/* ============================================================
+   VEHICLE PHOTOS
+   ============================================================ */
+api.get('/vehicles/:id/photos', requireAuth, wrap(async (req, res) => {
+  const v = assertVehicle(req.user.id, +req.params.id);
+  res.json({ photos: db.prepare('SELECT * FROM vehicle_photos WHERE vehicle_id=? ORDER BY is_primary DESC, id DESC').all(v.id) });
+}));
+
+api.post('/vehicles/:id/photos', requireAuth, upload.single('file'), wrap(async (req, res) => {
+  const v = assertVehicle(req.user.id, +req.params.id, true);
+  if (!req.file) throw httpErr(400, 'No image received.');
+  if (!/^image\//.test(req.file.mimetype)) throw httpErr(400, 'That is not an image.');
+  const first = db.prepare('SELECT COUNT(*) c FROM vehicle_photos WHERE vehicle_id=?').get(v.id).c === 0;
+  const row = insert('vehicle_photos', {
+    vehicle_id: v.id, file_path: path.basename(req.file.path), file_name: req.file.originalname,
+    file_mime: req.file.mimetype, file_size: req.file.size,
+    caption: req.body?.caption || null,
+    captured_at: req.body?.captured_at || new Date().toISOString().slice(0, 10),
+    is_primary: first ? 1 : 0
+  });
+  res.status(201).json({ photo: row });
+}));
+
+api.post('/photos/:pid/primary', requireAuth, wrap(async (req, res) => {
+  const p = db.prepare('SELECT * FROM vehicle_photos WHERE id=?').get(+req.params.pid);
+  if (!p) throw httpErr(404, 'Photo not found.');
+  assertVehicle(req.user.id, p.vehicle_id, true);
+  db.prepare('UPDATE vehicle_photos SET is_primary=0 WHERE vehicle_id=?').run(p.vehicle_id);
+  db.prepare('UPDATE vehicle_photos SET is_primary=1 WHERE id=?').run(p.id);
+  res.json({ ok: true });
+}));
+
+api.patch('/photos/:pid', requireAuth, wrap(async (req, res) => {
+  const p = db.prepare('SELECT * FROM vehicle_photos WHERE id=?').get(+req.params.pid);
+  if (!p) throw httpErr(404, 'Photo not found.');
+  assertVehicle(req.user.id, p.vehicle_id, true);
+  res.json({ photo: update('vehicle_photos', p.id, pick(req.body || {}, ['caption', 'captured_at'])) });
+}));
+
+api.delete('/photos/:pid', requireAuth, wrap(async (req, res) => {
+  const p = db.prepare('SELECT * FROM vehicle_photos WHERE id=?').get(+req.params.pid);
+  if (!p) throw httpErr(404, 'Photo not found.');
+  assertVehicle(req.user.id, p.vehicle_id, true);
+  db.prepare('DELETE FROM vehicle_photos WHERE id=?').run(p.id);
+  if (p.is_primary) {
+    const next = db.prepare('SELECT id FROM vehicle_photos WHERE vehicle_id=? ORDER BY id DESC LIMIT 1').get(p.vehicle_id);
+    if (next) db.prepare('UPDATE vehicle_photos SET is_primary=1 WHERE id=?').run(next.id);
+  }
+  res.json({ ok: true });
+}));
+
+/** Photos are served under vehicle ownership, like documents. */
+api.get('/photo/:name', requireAuth, wrap(async (req, res) => {
+  const name = path.basename(req.params.name);
+  const p = db.prepare('SELECT * FROM vehicle_photos WHERE file_path=?').get(name)
+    || db.prepare('SELECT vehicle_id, photo_path AS file_path FROM torque_specs WHERE photo_path=?').get(name);
+  if (!p) throw httpErr(404, 'Not found.');
+  assertVehicle(req.user.id, p.vehicle_id);
+  const fp = path.join(UPLOAD_DIR, name);
+  if (!fs.existsSync(fp)) throw httpErr(404, 'File missing from storage.');
+  res.sendFile(fp);
+}));
+
+/* ============================================================
+   TIMELINE + SEARCH
+   ============================================================ */
+api.get('/vehicles/:id/timeline', requireAuth, wrap(async (req, res) => {
+  const v = assertVehicle(req.user.id, +req.params.id);
+  res.json(timelineFor(v.id, {
+    kinds: req.query.kinds ? String(req.query.kinds).split(',').filter(Boolean) : null,
+    system: req.query.system || null,
+    from: req.query.from || null,
+    to: req.query.to || null,
+    limit: Math.min(1000, +req.query.limit || 400)
+  }));
+}));
+
+api.get('/search', requireAuth, wrap(async (req, res) => {
+  res.json(searchAll(req.user.id, req.query.q));
+}));
+
+/* ============================================================
+   ANALYTICS — series for the charts
+   ============================================================ */
+api.get('/vehicles/:id/analytics', requireAuth, wrap(async (req, res) => {
+  const v = assertVehicle(req.user.id, +req.params.id);
+  const period = analytics.PERIODS[req.query.period] ? req.query.period : '1Y';
+  res.json(analytics.analyticsFor(v, period));
+}));
+
+/* Assigning a system to old service records. One at a time, by the
+   person who knows what the job actually was. */
+api.patch('/service/:sid/system', requireAuth, wrap(async (req, res) => {
+  const r = ownedRow(req.user.id, 'service_records', +req.params.sid, false);
+  const sys = req.body?.system || null;
+  db.prepare('UPDATE service_records SET system=?, updated_at=? WHERE id=?')
+    .run(sys, new Date().toISOString(), r.id);
+  audit(req.user.id, r.vehicle_id, 'service.system', r.what + ' -> ' + (sys || 'none'));
+  res.json(db.prepare('SELECT * FROM service_records WHERE id=?').get(r.id));
+}));
+
+api.get('/service/uncategorised/:vid', requireAuth, wrap(async (req, res) => {
+  const v = assertVehicle(req.user.id, +req.params.vid);
+  res.json(db.prepare(
+    'SELECT id, what, category, date, cost, parts_cost, labor_cost FROM service_records ' +
+    'WHERE vehicle_id=? AND system IS NULL ORDER BY date DESC'
+  ).all(v.id));
+}));
+
+/* ---------- live-data annotations ---------- */
+api.get('/sessions/:sid/notes', requireAuth, wrap(async (req, res) => {
+  const s = ownedRow(req.user.id, 'diag_sessions', +req.params.sid, false);
+  res.json(db.prepare('SELECT * FROM datalog_notes WHERE session_id=? ORDER BY t_ms').all(s.id));
+}));
+
+api.post('/sessions/:sid/notes', requireAuth, wrap(async (req, res) => {
+  const s = ownedRow(req.user.id, 'diag_sessions', +req.params.sid, false);
+  const text = (req.body?.text || '').trim();
+  if (!text) throw httpErr(400, 'A note needs some text.');
+  const row = insert('datalog_notes', {
+    session_id: s.id,
+    t_ms: Math.max(0, Math.round(req.body?.t_ms || 0)),
+    text,
+    severity: ['note', 'warn', 'critical'].includes(req.body?.severity) ? req.body.severity : 'note'
+  });
+  res.status(201).json(row);
+}));
+
+api.delete('/notes/:nid', requireAuth, wrap(async (req, res) => {
+  const n = db.prepare('SELECT * FROM datalog_notes WHERE id=?').get(+req.params.nid);
+  if (!n) throw httpErr(404, 'Note not found.');
+  ownedRow(req.user.id, 'diag_sessions', n.session_id, false);
+  db.prepare('DELETE FROM datalog_notes WHERE id=?').run(n.id);
+  res.json({ ok: true });
 }));
 
 /* ---------- error handler ---------- */

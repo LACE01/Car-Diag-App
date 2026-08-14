@@ -165,6 +165,7 @@ let TASK = null;
 async function openTask(id) {
   try {
     TASK = await API.get('/reminders/' + id + '/detail');
+    TASK.torque = await loadTorque('reminder', id);
     drawTask();
   } catch (e) { toast(e.message, 'bad'); }
 }
@@ -193,16 +194,10 @@ function drawTask() {
     '<div class="note" style="color:var(--ink)">' + esc(t.capacity || 'Not recorded') + '</div></div>' +
     '</div>' +
 
-    /* ---- torque ---- */
-    '<div class="card tight" style="margin-bottom:14px">' +
-    '<div class="between" style="margin-bottom:8px"><span class="mlabel mute" style="margin:0">Torque specs</span>' +
-    '<button class="btn xs ghost" onclick="editTaskSpecs()">Edit specs</button></div>' +
-    (TASK.torque_specs.length
-      ? TASK.torque_specs.map(s => '<div class="kv"><span style="flex:1;text-align:left">' + esc(s.name) + '</span>' +
-        '<b class="mono">' + esc(s.value) + '</b></div>').join('')
-      : '<p class="note" style="margin:0">None recorded yet. Add them from a source you hold — Garage will not invent a torque value.</p>') +
-    (t.spec_source ? '<div class="note" style="margin-top:8px">Source: ' + esc(t.spec_source) + '</div>' : '') +
-    '</div>' +
+    /* ---- torque: a real module, sourced and confirmable ---- */
+    torqueModule(TASK.torque || [], 'reminder', t.id) +
+    '<div class="row" style="gap:8px;margin-top:8px">' +
+    '<button class="btn xs ghost" onclick="editTaskSpecs()">Edit fluid / capacity</button></div>' +
 
     /* ---- checklist ---- */
     '<div class="between" style="margin:16px 0 10px">' +
@@ -250,7 +245,7 @@ function checklistRow(i) {
     (i.part ? '<span class="mono" style="color:var(--warn)">PART // ' + esc(i.part) + '</span>' : '') +
     '<input class="inp" style="margin-top:7px;padding:7px 11px;font-size:12.5px" value="' + esc(i.note || '') + '" ' +
     'placeholder="Note for this step — what you found, what you used, what to do differently" ' +
-    'onchange="stepNote(' + i.id + ',this.value)">' +
+    'oninput="saveField(\'step' + i.id + '\',\'PATCH\',\'/checklist/' + i.id + '\',{note:this.value})">' +
     '</div>' +
     '<button class="btn xs ghost" onclick="delStep2(' + i.id + ')">×</button></div>';
 }
@@ -795,11 +790,25 @@ function renderWear() {
   const v = activeVehicle();
   if (!v) return needVehicle(el, 'track tire, brake and battery condition');
   const d = D();
+
+  /* The visual panels are additive — they load after the existing
+     screen paints, so every control below keeps working even if the
+     analytics request is slow or fails. */
+  wearVisuals().then(html => {
+    const slot = document.getElementById('wearviz');
+    if (slot) slot.innerHTML = html;
+  }).catch(() => {
+    const slot = document.getElementById('wearviz');
+    if (slot) slot.innerHTML = '<p class="note">Condition panels could not load. Your records below are unaffected.</p>';
+  });
+
   const tires = d.tires || [];
   const bat = d.battery;
   const br = d.brakes;
 
   el.innerHTML =
+    '<div id="wearviz"><p class="note">Reading your measurements…</p></div>' +
+    '<div style="height:26px"></div>' +
     '<div class="between" style="margin-bottom:14px"><h3 style="font-size:19px">Tires</h3>' +
     '<button class="btn sm" onclick="addTireSet()">+ Add a set</button></div>' +
     (tires.length ? tires.map(t =>
@@ -973,14 +982,20 @@ function addBattery() {
     fld('Cranking voltage', inp('b-cv', { type: 'number', step: '0.01', mono: true, ph: '10.1' })) +
     fld('Measured CCA', inp('b-mcca', { type: 'number', mono: true })) + '</div>' +
     '<div style="height:14px"></div>' + fld('Load test', sel('b-load', [['pass', 'Pass'], ['marginal', 'Marginal'], ['fail', 'Fail']], 'pass')) +
-    '<p class="note" style="margin:12px 0 16px">Measure rest voltage after the car has sat at least four hours — a surface charge right after driving reads high and tells you nothing.</p>' +
+    '<div style="height:14px"></div><div class="grid g2" style="gap:14px">' +
+    fld('Free-replacement (months)', inp('b-warr', { type: 'number', mono: true, ph: '36', value: b.warranty_months || '' })) +
+    fld('Pro-rata (months)', inp('b-warrp', { type: 'number', mono: true, ph: '84', value: b.warranty_prorata_months || '' })) + '</div>' +
+    '<p class="note" style="margin:12px 0 16px">Measure rest voltage after the car has sat at least four hours — a surface charge right after driving reads high and tells you nothing. ' +
+    'Warranty months come off the battery label or the receipt; Garage will not assume a period, because terms vary by brand, retailer and promotion — ' +
+    'and a wrong date is a claim you turn up too late for.</p>' +
     '<button class="btn block" onclick="saveBattery()">Save</button>');
 }
 async function saveBattery() {
   await API.post('/vehicles/' + state.activeId + '/battery', {
     installed_date: val('b-inst'), group_size: val('b-grp'), cca: intVal('b-cca'), brand: val('b-brand'),
     test_date: val('b-tdate'), rest_voltage: numVal('b-rv'), cranking_voltage: numVal('b-cv'),
-    measured_cca: intVal('b-mcca'), load_test: val('b-load')
+    measured_cca: intVal('b-mcca'), load_test: val('b-load'),
+    warranty_months: intVal('b-warr'), warranty_prorata_months: intVal('b-warrp')
   });
   closeModal(); await refreshDetail(); await loadAll(); toast('Battery record saved', 'ok');
 }

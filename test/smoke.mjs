@@ -3,7 +3,39 @@
      node test/smoke.mjs [baseUrl]
    Exits non-zero on the first failure.
    ============================================================ */
-const BASE = process.argv[2] || 'http://127.0.0.1:2026';
+/* If a URL is given, test whatever is running there — that is how you
+   check a real container. With no argument, start a throwaway server on
+   a scratch database so the suite runs unattended in CI or a sandbox. */
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+let child = null, scratch = null;
+let BASE = process.argv[2] || process.env.GARAGE_URL || '';
+
+if (!BASE) {
+  scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'garage-smoke-'));
+  const port = 2500 + Math.floor(Math.random() * 400);
+  BASE = 'http://127.0.0.1:' + port;
+  child = spawn(process.execPath, ['server/index.js'], {
+    env: { ...process.env, DATA_DIR: scratch, PORT: String(port) },
+    stdio: ['ignore', 'ignore', 'pipe']
+  });
+  let up = false;
+  for (let i = 0; i < 80 && !up; i++) {
+    try { await fetch(BASE + '/healthz'); up = true; }
+    catch { await new Promise(r => setTimeout(r, 100)); }
+  }
+  if (!up) { console.error('could not start a server for the smoke test'); process.exit(1); }
+}
+
+function cleanup() {
+  if (child) child.kill('SIGKILL');
+  if (scratch) { try { fs.rmSync(scratch, { recursive: true, force: true }); } catch { } }
+}
+process.on('exit', cleanup);
+
 let cookie = '';
 let pass = 0, fail = 0;
 
@@ -427,6 +459,58 @@ async function req(method, path, body, form) {
   ok('alerts drill down rather than only jumping', /function openAlert/.test(assets['/js/app.js'] || ''));
   ok('tasks open into a checklist', /function openTask/.test(assets['/js/screens.js'] || ''));
   ok('stores can be added by hand', /function addStoreManually/.test(assets['/js/parts.js'] || ''));
+
+
+  /* ---------- analytics and charts ---------- */
+  {
+    const fs2 = await import('node:fs');
+    const rd = p => fs2.readFileSync(p, 'utf8');
+
+    const charts = rd('public/js/charts.js');
+    ok('chart engine ships', charts.length > 4000);
+    ok('charts are dependency-free (no CDN, no bundler)',
+      !/require\(|import .* from|cdn\.|unpkg|jsdelivr/.test(charts));
+    ok('chart empty states offer a way out', /o\.action\.run/.test(charts));
+    ok('charts expose a keyboard-reachable data table', /chartTable/.test(charts) && /tabindex="0"/.test(charts));
+    ok('charts honour reduced motion', /prefers-reduced-motion/.test(charts));
+    ok('gauge refuses to draw an unknown value', /unknown/.test(charts) && /NO DATA/.test(charts));
+
+    const aui = rd('public/js/analytics-ui.js');
+    ok('analytics screen registers a renderer', /renderers\.analytics/.test(aui));
+    ok('record status is not presented as vehicle health',
+      /does not calculate a vehicle health score/.test(aui));
+    ok('forecast items are labelled', /FORECAST/.test(aui));
+    ok('uncategorised spend is assigned by the user, not guessed',
+      /will not guess which system/.test(aui));
+
+    const wv = rd('public/js/wear-viz.js');
+    ok('wear thresholds cite their source', /federal minimum/.test(wv) && /widely published minimum/.test(wv));
+    ok('tire panel does not certify safety', /does not certify a tire as safe or unsafe/.test(wv));
+    ok('battery SoC is not presented as health', /not a health test/.test(wv));
+    ok('battery warranty needs entered dates', /will not assume a period|Add the warranty period/.test(wv));
+
+    const lv = rd('public/js/live-viz.js');
+    ok('live data refuses to judge readings', /does not label readings normal or abnormal/.test(lv));
+    ok('freeze frame is shown unaltered', /does not convert, normalise or judge/.test(lv));
+
+    const css = rd('public/css/app.css');
+    ok('chart panels are themed, not hard-coded', /\.chartcard/.test(css) && /var\(--plot\)/.test(css));
+    ok('series colours exist as tokens', /--violet:/.test(css) && /--magenta:/.test(css));
+  }
+
+  /* ---------- analytics endpoint over HTTP ---------- */
+  r = await req('GET', `/api/vehicles/${vid}/analytics?period=1Y`);
+  ok('analytics endpoint responds', r.status === 200, r.body);
+  ok('analytics returns every panel',
+    !!r.body?.cost && !!r.body?.fuel && !!r.body?.odometer &&
+    !!r.body?.systems && !!r.body?.horizon && !!r.body?.gauges, Object.keys(r.body || {}));
+  ok('every derived figure states its basis',
+    typeof r.body?.headline?.costPerMileBasis === 'string');
+  ok('an unsupported period falls back rather than erroring',
+    (await req('GET', `/api/vehicles/${vid}/analytics?period=NONSENSE`)).status === 200);
+
+  r = await req('GET', `/api/service/uncategorised/${vid}`);
+  ok('uncategorised service list responds', r.status === 200 && Array.isArray(r.body), r.body);
 
   console.log(`\n${pass} passed, ${fail} failed\n`);
   process.exit(fail ? 1 : 0);

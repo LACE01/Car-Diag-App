@@ -111,5 +111,85 @@ if (fs.existsSync(cssPath)) {
   if (depth !== 0) report('public/css/app.css', 0, `unbalanced braces (depth ${depth})`);
 }
 
+/* ============================================================
+   6. Inline handlers that call a function nobody defined.
+
+   The whole client is strings of HTML with onclick="doThing()".
+   A typo or a renamed helper produces no build error, no console
+   warning until the moment the user clicks — and then a dead
+   button with a ReferenceError they'll never see. This has
+   already happened twice (openOdo, vehLabel) in one sitting.
+
+   Collect every identifier called from an inline handler, and
+   every function/const declared across the client bundle plus
+   the browser globals we legitimately use. Anything called but
+   never declared is a button that does nothing.
+   ============================================================ */
+{
+  const jsDir = path.join(root, 'public/js');
+  const jsFiles = fs.readdirSync(jsDir).filter(f => f.endsWith('.js'));
+  const sources = jsFiles.map(f => ({ file: 'public/js/' + f, src: fs.readFileSync(path.join(jsDir, f), 'utf8') }));
+  const htmlPath = path.join(root, 'public/index.html');
+  const html = fs.existsSync(htmlPath) ? fs.readFileSync(htmlPath, 'utf8') : '';
+  const allJs = sources.map(s => s.src).join('\n');
+
+  const declared = new Set();
+  for (const re of [
+    /(?:^|\n)\s*(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/g,
+    /(?:^|\n)\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)/g,
+    /(?:^|\n)\s*([A-Za-z_$][\w$]*)\s*[:=]\s*(?:async\s*)?(?:function|\()/g,
+    /window\.([A-Za-z_$][\w$]*)\s*=/g
+  ]) for (const m of allJs.matchAll(re)) declared.add(m[1]);
+
+  /* browser and platform globals the handlers are allowed to reach */
+  const GLOBALS = new Set([
+    'alert', 'confirm', 'prompt', 'console', 'window', 'document', 'location', 'history',
+    'event', 'this', 'navigator', 'fetch', 'setTimeout', 'setInterval', 'clearTimeout',
+    'localStorage', 'sessionStorage', 'JSON', 'Math', 'Date', 'Number', 'String', 'Boolean',
+    'Array', 'Object', 'parseInt', 'parseFloat', 'isNaN', 'encodeURIComponent', 'decodeURIComponent',
+    'Promise', 'Set', 'Map', 'URL', 'FormData', 'Intl', 'requestAnimationFrame', 'if', 'return',
+    'for', 'while', 'typeof', 'new', 'await', 'function', 'else', 'switch', 'catch', 'try'
+  ]);
+
+  const called = new Map();                  // name -> "file:line"
+
+  /* Two shapes carry handler code in this codebase, and both have to
+     be checked. The first is a literal HTML attribute. The second is
+     a string passed as component options — `onClick:` on a metric or
+     gauge, `run:` on an empty-state action — which only becomes an
+     attribute later, inside charts.js. A dead handler is just as dead
+     either way, so both forms are scanned. */
+  const PATTERNS = [
+    /\son(?:click|change|input|submit|keydown|keyup|focus|blur|pointerdown)\s*=\s*(["'])([\s\S]*?)\1/g,
+    /\b(?:onClick|onChange|onKey|run)\s*:\s*(["'])([\s\S]*?)\1/g
+  ];
+
+  for (const { file, src } of [...sources, { file: 'public/index.html', src: html }]) {
+    const lines = src.split('\n');
+    lines.forEach((ln, i) => {
+      for (const HANDLER of PATTERNS) {
+        HANDLER.lastIndex = 0;
+        for (const m of ln.matchAll(HANDLER)) {
+          const code = m[2];
+          for (const c of code.matchAll(/([A-Za-z_$][\w$]*)\s*\(/g)) {
+            const name = c[1];
+            if (GLOBALS.has(name)) continue;
+            // skip method calls:  foo.bar()  and  this.bar()
+            const at = c.index;
+            if (at > 0 && code[at - 1] === '.') continue;
+            if (!called.has(name)) called.set(name, `${file}:${i + 1}`);
+          }
+        }
+      }
+    });
+  }
+
+  for (const [name, where] of called) {
+    if (declared.has(name)) continue;
+    const [file, line] = where.split(':');
+    report(file, +line, `inline handler calls ${name}(), which is never defined — the control will do nothing when clicked`);
+  }
+}
+
 console.log(problems ? `\n${problems} problem(s) found\n` : '  ✓ lint clean\n');
 process.exit(problems ? 1 : 0);
