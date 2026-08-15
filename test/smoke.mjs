@@ -498,6 +498,34 @@ async function req(method, path, body, form) {
     ok('series colours exist as tokens', /--violet:/.test(css) && /--magenta:/.test(css));
   }
 
+  /* ---------- import surface ---------- */
+  {
+    const fs3 = await import('node:fs');
+    const iu = fs3.readFileSync('public/js/import-ui.js', 'utf8');
+    ok('import UI ships', iu.length > 2000);
+    ok('locked dongles are named, including the HT500', /HT500/.test(iu) && /BlueDriver/.test(iu) && /FIXD/.test(iu));
+    ok('manufacturer-specific codes are not given a generic gloss silently',
+      /often simply wrong|NEEDS VERIFICATION/.test(iu));
+    ok('a failed import offers the next thing to try', /importFailed/.test(iu));
+
+    const obd = fs3.readFileSync('public/js/obd.js', 'utf8');
+    ok('iOS limitation stated accurately', /every browser is Safari underneath/.test(obd));
+    ok('locked dongles are caught before a confusing GATT failure', /LOCKED_TO_OWN_APP/.test(obd));
+    ok('adapter list covers the common BLE dongles',
+      /vLinker/.test(obd) && /OBDLink/.test(obd) && /Nordic UART/.test(obd));
+
+    const si = fs3.readFileSync('server/scanimport.js', 'utf8');
+    ok('parser documents why it will not gloss manufacturer codes', /wrong answer delivered confidently/.test(si));
+    ok('parser guards against matching inside a VIN', /isRealMatch/.test(si));
+  }
+
+  r = await req('POST', `/api/vehicles/${vid}/codes`, { codes: [{ code: 'P0420' }] });
+  ok('typed codes import over HTTP', r.status === 201 && r.body?.added >= 0, r.body);
+  r = await req('GET', '/api/decode/P0171');
+  ok('decode endpoint responds', r.status === 200 && !!r.body?.description, r.body);
+  r = await req('POST', `/api/vehicles/${vid}/import-report`, { text: 'no codes in this text at all' });
+  ok('a report with no codes is refused', r.status === 422, r.status);
+
   /* ---------- analytics endpoint over HTTP ---------- */
   r = await req('GET', `/api/vehicles/${vid}/analytics?period=1Y`);
   ok('analytics endpoint responds', r.status === 200, r.body);

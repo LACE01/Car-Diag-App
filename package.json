@@ -10,10 +10,11 @@
     "dev": "node --watch server/index.js",
     "lint": "node test/lint.mjs",
     "smoke": "node test/smoke.mjs",
-    "test": "node test/lint.mjs && node test/torque.test.mjs && node test/charts.test.mjs && node test/analytics.test.mjs && node test/render.test.mjs && node test/smoke.mjs",
+    "test": "node test/lint.mjs && node test/torque.test.mjs && node test/charts.test.mjs && node test/import.test.mjs && node test/analytics.test.mjs && node test/render.test.mjs && node test/smoke.mjs",
     "test:charts": "node test/charts.test.mjs",
     "test:analytics": "node test/analytics.test.mjs",
-    "test:render": "node test/render.test.mjs"
+    "test:render": "node test/render.test.mjs",
+    "test:import": "node test/import.test.mjs"
   },
   "engines": {
     "node": ">=22.5"

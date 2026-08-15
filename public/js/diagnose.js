@@ -58,7 +58,14 @@ function renderDiagnose() {
 
     (!Elm327BleAdapter.supported ?
       '<div class="card" style="margin-top:16px"><span class="mlabel">Adapter support on this device</span>' +
-      '<p class="note" style="margin:0">This browser does not expose Web Bluetooth, so live scanning is unavailable here. Chrome or Edge on Windows, macOS, Linux or Android works. Safari and iPadOS never expose it to web pages — on iPad the native Capacitor shell uses the same IAdapter interface via <span class="mono">@capacitor-community/bluetooth-le</span>. In the meantime, import a scanner report from the Records screen: it produces the same DTC history from a Topdon, Autel or Launch export.</p></div>' : '') +
+      '<p class="note" style="margin:0">This browser does not expose Web Bluetooth, so live scanning is unavailable here. ' +
+      'Chrome or Edge on Windows, macOS, Linux or Android works. Safari does not — and on iPhone and iPad every browser ' +
+      'is Safari underneath, so Chrome and Firefox there cannot do it either. That is an Apple platform restriction, not something an app can work around. ' +
+      'Import your scanner\'s report below instead: it builds the same code history.</p></div>' : '') +
+
+    /* The importer sits here, at the point of failure — not on another
+       screen the user has to be told to go and find. */
+    importPanel() +
 
     (window.isSecureContext ? '' :
       '<div class="card" style="margin-top:16px"><span class="mlabel">Web Bluetooth needs a secure context</span>' +
@@ -125,11 +132,25 @@ function dtcRow(t) {
   const dec = t.decoded || {};
   const cls = t.status === 'pending' ? 'warn' : t.status === 'permanent' ? 'grey' : 'bad';
   const kbKey = 'dtc_' + t.code;
+  /* Where the wording came from matters. A generic J2012 definition
+     shown against a manufacturer-specific code (P1xxx, and most B, C
+     and U codes) can describe a completely different fault, so it is
+     labelled rather than presented as though the tool had said it. */
+  const manufacturerSpecific = /^[PCBU]1/.test(t.code) || /^[BCU]/.test(t.code);
+  const src = t.source === 'imported' ? 'IMPORTED'
+    : t.source === 'user_entered' ? 'USER ENTERED'
+    : t.source === 'generic_decode' ? (manufacturerSpecific ? 'NEEDS VERIFICATION' : 'CALCULATED')
+    : null;
+
   return '<div class="rowitem"><div class="ico mono" style="font-size:12px">' + esc(t.code) + '</div>' +
     '<div class="txt"><b>' + esc(t.description || dec.description || '') + '</b>' +
     '<span>' + esc(dec.scope || '') + (dec.subsystem ? ' · ' + esc(dec.subsystem) : '') +
     ' · first seen ' + dateShort(t.first_seen) +
-    (t.clear_count ? ' · returned after ' + t.clear_count + ' clear' + (t.clear_count > 1 ? 's' : '') : '') + '</span></div>' +
+    (t.clear_count ? ' · returned after ' + t.clear_count + ' clear' + (t.clear_count > 1 ? 's' : '') : '') +
+    (t.source === 'generic_decode' && manufacturerSpecific
+      ? ' · generic definition shown — this code is manufacturer-specific, check your manual'
+      : '') + '</span></div>' +
+    (src ? srcChip(src) : '') +
     '<span class="chip ' + cls + '">' + esc(t.status) + '</span>' +
     (t.freeze_frame ? '<button class="btn xs ghost" onclick="showFreeze(' + t.id + ')">Freeze frame</button>' : '') +
     (KB[kbKey] ? '<button class="btn xs ghost" onclick="inspect(\'' + kbKey + '\')">Diagnose</button>' : '') +

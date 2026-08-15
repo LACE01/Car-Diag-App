@@ -246,6 +246,43 @@ Full JSON export of everything, always available. Data portability is not a feat
 
 ---
 
+## Getting codes in from any scanner
+
+Most consumer Bluetooth dongles are locked to one app and do not implement the generic ELM327
+command set, so no web page can read from them on any platform. The Hyper Tough HT500 is an Innova
+device and talks only to RepairSolutions2; BlueDriver, FIXD and Carly are the same arrangement.
+Separately, **iOS has never exposed Web Bluetooth to any browser** — Chrome and Firefox on iPhone
+are Safari underneath, so there is no browser workaround, only a native shell.
+
+Rather than leave that as a dead end, the Diagnose screen carries three ways in:
+
+| Route | Works with | Notes |
+|---|---|---|
+| **Type the codes** | anything with a screen | Decodes live as you type. About ten seconds. |
+| **Upload the export** | PDF, CSV, TSV, JSON, XML, HTML, text | RepairSolutions2, Topdon, Autel, Launch, BlueDriver, Torque, Car Scanner, OBD Fusion |
+| **Paste the text** | an emailed report, a share sheet | Finds codes in any layout |
+
+PDF text extraction is hand-rolled in `server/pdftext.js` — content-stream parsing with
+Flate, ASCII85, ASCIIHex and LZW filters. It follows the same reasoning as the ZIP reader in
+`ingest.js`: a PDF library is tens of megabytes and a CVE feed to do a job that is a few hundred
+lines when all you need is text. Nothing from the document is executed.
+
+Two details that took more care than they look:
+
+- The DTC pattern is **not** `\b[PCBU][0-3][0-9A-F]{3}\b`. That obvious version fails both ways —
+  a VIN like `1FTEWC1ABC345XYZ7` contains a code-shaped substring and matches, while a PDF that
+  positions words by kerning produces `P0301Cylinder1Misfire` where the trailing `\b` never
+  matches and every code in the file is missed. Both cases are in the tests.
+- A PDF that is a photograph of a scanner screen has no text objects. It says so and offers the
+  manual route, rather than reporting "no codes found" as though it had read the file.
+
+Descriptions are only ever repeated back when the report contained them. Where it did not, the
+code is decoded against the SAE J2012 generic table and **labelled** — because P1xxx and most B, C
+and U codes are manufacturer-specific, and a generic definition against one of those is a
+plausible sentence describing a different fault.
+
+Uploaded reports are parsed and discarded; the file is not retained.
+
 ## Charts, and the rule behind them
 
 The analytics screen draws from your records and nothing else. There is no seeded demo data, no

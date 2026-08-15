@@ -215,6 +215,25 @@ try {
   ok(/meter|mt-track/.test(wear), 'brake meters rendered');
   ok(!/Reading your measurements/.test(wear), 'the loading placeholder was replaced');
 
+  /* ---------- the importer must be present on Diagnose ---------- */
+  await renderers.diagnose();
+  await new Promise(r => setTimeout(r, 60));
+  const diag = window.document.getElementById('s-diagnose').innerHTML;
+  ok(/Import codes from any scanner/.test(diag), 'the importer is on the Diagnose screen itself');
+  ok(/Type the codes/.test(diag), 'the manual route is offered');
+  ok(/type="file"/.test(diag), 'the file upload is offered');
+  ok(/Hyper Tough HT500/.test(diag), 'locked dongles are named so the user is not left guessing');
+  ok(!/Records screen/.test(diag), 'it no longer sends the user to another screen');
+
+  /* the typed-codes dialog must open and validate without a network round trip */
+  G('typeCodes')();
+  const modal = window.document.getElementById('mbox').innerHTML;
+  ok(/tc-in/.test(modal), 'the type-a-code dialog opens');
+  const parsed = G('parseTypedCodes')('p0420, notacode P0171');
+  ok(parsed.good.length === 2 && parsed.good[0] === 'P0420', 'typed codes are normalised and validated');
+  ok(parsed.bad.includes('NOTACODE'), 'and rubbish is reported back rather than dropped silently');
+  G('closeModal')();
+
   /* ---------- an empty vehicle must not fabricate ---------- */
   const V2 = (await api('POST', '/vehicles', { year: 2020, make: 'Honda', model: 'Civic', nickname: 'Empty' })).vehicle.id;
   G('state').activeId = V2;

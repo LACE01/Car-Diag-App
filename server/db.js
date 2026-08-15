@@ -795,6 +795,26 @@ const MIGRATIONS = [
     ALTER TABLE battery_records ADD COLUMN warranty_prorata_months INTEGER;
     ALTER TABLE battery_records ADD COLUMN receipt_path TEXT;
     `
+  },
+
+  {
+    id: '011_dtc_source',
+    sql: `
+    -- Where a code's description came from.
+    --
+    --   imported        the scan report stated it, in the tool's own words
+    --   generic_decode  the report gave no wording, so this is the SAE
+    --                   J2012 generic definition for that code
+    --   scan            read live from the vehicle by an adapter
+    --   user_entered    typed in by hand
+    --
+    -- The distinction matters most for P1xxx and for most B, C and U
+    -- codes, which are manufacturer-specific. A generic definition
+    -- shown against one of those is a plausible sentence that may
+    -- describe a completely different fault, so the UI labels it
+    -- rather than presenting it as the manufacturer's wording.
+    ALTER TABLE dtcs ADD COLUMN source TEXT NOT NULL DEFAULT 'scan';
+    `
   }
 ];
 

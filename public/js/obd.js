@@ -89,15 +89,45 @@ class BaseAdapter {
    are out. Wi-Fi dongles work but hijack the network interface,
    which kills sync mid-session. BLE is the right target.
    ============================================================ */
+/* ------------------------------------------------------------
+   Service UUIDs worth asking for.
+
+   There is no standard GATT service for OBD adapters, so every
+   manufacturer picked something. Missing one means the dongle
+   never appears in the chooser and the user concludes the app is
+   broken — so this list is deliberately generous. Web Bluetooth
+   still shows a picker and still requires the user to choose a
+   device, so breadth here costs nothing in privacy.
+   ------------------------------------------------------------ */
 const BLE_SERVICES = [
   0xfff0,                                          // Vgate iCar Pro, many generic clones
-  0xffe0,                                          // HM-10 style modules
+  0xffe0,                                          // HM-10 / JDY style modules
   0xfff1,
+  0xffe5,                                          // some HM-10 clones split TX onto ffe5
+  0xfd00,                                          // Konnwei, several rebadges
+  0xff00,                                          // LELink and relatives
+  0x18f0,                                          // a few Chinese BLE-SPP bridges
   '00001101-0000-1000-8000-00805f9b34fb',          // SPP UUID some modules advertise
   '0000fff0-0000-1000-8000-00805f9b34fb',
   '0000ffe0-0000-1000-8000-00805f9b34fb',
-  'e7810a71-73ae-499d-8c15-faa9aef0c3f2'           // OBDLink-style vendor service
+  '0000ffe5-0000-1000-8000-00805f9b34fb',
+  '0000fd00-0000-1000-8000-00805f9b34fb',
+  'e7810a71-73ae-499d-8c15-faa9aef0c3f2',          // OBDLink / STN vendor service
+  '6e400001-b5a3-f393-e0a9-e50e24dcca9e',          // Nordic UART — used by several ESP32 dongles
+  'bae55b96-7d19-458d-970c-50613d801bc9'           // vLinker vendor service
 ];
+
+const BLE_NAME_PREFIXES = [
+  'OBD', 'OBDII', 'OBD2', 'VEEPEAK', 'Vgate', 'vgate', 'IOS-Vlink', 'vLinker',
+  'OBDLink', 'STN', 'ELM', 'V-LINK', 'KONNWEI', 'LELink', 'iCar', 'ANCEL', 'Viecar'
+];
+
+/* Dongles that will never work from a browser, and why. Naming them
+   is kinder than letting someone spend an evening on it. The HT500 in
+   particular is an Innova device: it speaks a proprietary protocol to
+   RepairSolutions2 and does not implement ELM327 AT commands at all,
+   so no amount of UUID guessing will reach it. */
+const LOCKED_TO_OWN_APP = /ht ?[35]\d\d|innova|repairsolutions|bluedriver|fixd|carly|hyper ?tough/i;
 
 class Elm327BleAdapter extends BaseAdapter {
   constructor() {
@@ -117,7 +147,9 @@ class Elm327BleAdapter extends BaseAdapter {
 
   async connect() {
     if (!Elm327BleAdapter.supported) {
-      throw new Error('This browser has no Web Bluetooth. Chrome or Edge on Windows/Android works; Safari and iPadOS do not expose it, so use the native shell or the report importer there.');
+      throw new Error('This browser has no Web Bluetooth. Chrome or Edge on Windows, macOS, Linux or Android works. ' +
+        'Safari does not — and on iPhone and iPad every browser is Safari underneath, so there is no browser that can do it. ' +
+        'Use the importer on this screen instead: your scanner app\'s exported report produces the same code history.');
     }
     if (!window.isSecureContext) {
       throw new Error('Web Bluetooth needs a secure context. Open Garage on https://, or on http://localhost — a plain LAN IP over http will be blocked by the browser.');
@@ -125,9 +157,19 @@ class Elm327BleAdapter extends BaseAdapter {
     this.log('Requesting device…');
     this.device = await navigator.bluetooth.requestDevice({
       filters: BLE_SERVICES.map(s => ({ services: [s] }))
-        .concat([{ namePrefix: 'OBD' }, { namePrefix: 'VEEPEAK' }, { namePrefix: 'Vgate' }, { namePrefix: 'IOS-Vlink' }]),
+        .concat(BLE_NAME_PREFIXES.map(namePrefix => ({ namePrefix }))),
       optionalServices: BLE_SERVICES
     });
+
+    /* If the user picked something we already know is locked to its own
+       app, say so now rather than after a confusing GATT failure. */
+    if (LOCKED_TO_OWN_APP.test(this.device.name || '')) {
+      const n = this.device.name;
+      this.device = null;
+      throw new Error(n + ' is locked to its manufacturer\'s own app and does not speak the generic ELM327 protocol, ' +
+        'so no web page can read from it — on any platform. Use its own app to run the scan, export the report, ' +
+        'then import that file here. The codes end up in exactly the same place.');
+    }
     this.device.addEventListener('gattserverdisconnected', () => {
       this.connected = false;
       this.log('Adapter disconnected.');
@@ -146,7 +188,11 @@ class Elm327BleAdapter extends BaseAdapter {
       }
       if (this.rx && this.tx) break;
     }
-    if (!this.rx || !this.tx) throw new Error('Found the adapter but not a readable/writable characteristic pair. This dongle may use a proprietary protocol.');
+    if (!this.rx || !this.tx) {
+      throw new Error('Connected to ' + (this.device?.name || 'the device') + ', but it exposes no readable/writable ' +
+        'characteristic pair — which means it is not a generic ELM327 adapter. Dongles locked to their own app ' +
+        '(Innova and Hyper Tough, BlueDriver, FIXD, Carly) look like this. Import that app\'s exported report instead.');
+    }
 
     await this.rx.startNotifications();
     this.rx.addEventListener('characteristicvaluechanged', e => this._onData(e.target.value));

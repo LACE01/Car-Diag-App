@@ -30,6 +30,7 @@ import {
   timelineFor, searchAll
 } from './records.js';
 import * as analytics from './analytics.js';
+import { parseScanReport } from './scanimport.js';
 import * as core from './core.js';
 
 export const api = express.Router();
@@ -741,52 +742,136 @@ api.post('/fuel-trim', requireAuth, wrap(async (req, res) => {
 }));
 
 /* ---- Topdon / generic scanner report import (CSV or text) ---- */
-api.post('/vehicles/:id/import-report', requireAuth, wrap(async (req, res) => {
-  const v = assertVehicle(req.user.id, +req.params.id, true);
-  const text = String(req.body?.text || '');
-  if (!text.trim()) throw httpErr(400, 'Paste the text of the report, or upload the CSV.');
-
-  const codes = [];
-  const seen = new Set();
-  const re = /\b([PCBU][0-3][0-9A-F]{3})\b/gi;
-  let m;
-  while ((m = re.exec(text))) {
-    const code = m[1].toUpperCase();
-    if (seen.has(code)) continue;
-    seen.add(code);
-    // grab the rest of the line as the description if the tool wrote one
-    const lineStart = text.lastIndexOf('\n', m.index) + 1;
-    const lineEnd = text.indexOf('\n', m.index);
-    const line = text.slice(lineStart, lineEnd === -1 ? undefined : lineEnd);
-    const desc = line.replace(new RegExp(`.*${code}[\\s:,\\-]*`, 'i'), '').replace(/["|,;]+$/, '').trim();
-    const status = /pending/i.test(line) ? 'pending' : /permanent/i.test(line) ? 'permanent' : /history/i.test(line) ? 'history' : 'stored';
-    codes.push({ code, description: desc.length > 3 ? desc : null, status });
-  }
-  if (!codes.length) throw httpErr(422, 'No diagnostic trouble codes found in that text. Codes look like P0420, C0035, U0100.');
-
-  req.body = { adapter: req.body?.adapter || 'Imported report', imported_from: req.body?.source || 'Topdon report', codes, notes: req.body?.notes || null };
-  const fake = { params: { id: String(v.id) }, user: req.user, body: req.body };
-  // reuse the scan handler logic inline
-  const session = insert('diag_sessions', { vehicle_id: v.id, adapter: req.body.adapter, imported_from: req.body.imported_from, odometer: v.mileage, notes: req.body.notes });
-  const saved = [];
-  for (const c of codes) {
-    const dec = core.decodeDTC(c.code);
-    const prior = db.prepare('SELECT COUNT(*) c FROM dtcs WHERE vehicle_id=? AND code=?').get(v.id, dec.code).c;
-    if (prior) continue;
-    saved.push(insert('dtcs', { vehicle_id: v.id, session_id: session.id, code: dec.code, description: c.description || dec.description, status: c.status }));
-  }
-  audit(req.user.id, v.id, 'import.report', { found: codes.length, added: saved.length });
-  res.status(201).json({ session, found: codes.length, added: saved.length, dtcs: saved.map(d => ({ ...d, decoded: core.decodeDTC(d.code) })) });
-}));
-
-/* ============================================================
-   FILE UPLOADS — documents and attachments
-   ============================================================ */
+/* ---------- uploaded files land here ---------- */
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, UPLOAD_DIR),
   filename: (req, file, cb) => cb(null, `${Date.now()}-${crypto.randomBytes(6).toString('hex')}${path.extname(file.originalname).slice(0, 10)}`)
 });
 const upload = multer({ storage, limits: { fileSize: 25 * 1024 * 1024 } });
+
+/* ============================================================
+   IMPORT A SCAN REPORT — from any tool, in any of its formats.
+
+   This is the path that works when the dongle will not talk to a
+   browser, which is most of them: Innova/Hyper Tough, FIXD and
+   BlueDriver are locked to their own apps, and iOS has never
+   exposed Web Bluetooth to any browser at all. Every one of those
+   apps can still export or share a report, so that is what we read.
+   ============================================================ */
+function ingestCodes(req, v, parsed, sourceLabel) {
+  const ctx = parsed.context || {};
+
+  const session = insert('diag_sessions', {
+    vehicle_id: v.id,
+    adapter: sourceLabel,
+    imported_from: parsed.tool || sourceLabel,
+    odometer: ctx.odometer ?? v.mileage ?? null,
+    monitors_json: ctx.monitors ? JSON.stringify(ctx.monitors) : null,
+    notes: req.body?.notes || null
+  });
+
+  /* An odometer reading stated by the scan tool is a real reading from
+     a real moment, so it is filed as one — attributed to the tool, not
+     silently merged into the vehicle's headline mileage. */
+  if (ctx.odometer) {
+    try { postOdometer(v, ctx.odometer, 'obd', 'From an imported ' + (parsed.tool || 'scan') + ' report'); }
+    catch { /* an out-of-range reading is flagged elsewhere, not fatal here */ }
+  }
+
+  const saved = [];
+  const already = [];
+  for (const c of parsed.codes) {
+    const dec = core.decodeDTC(c.code);
+    const open = db.prepare('SELECT * FROM dtcs WHERE vehicle_id=? AND code=? AND cleared_at IS NULL').get(v.id, dec.code);
+    if (open) { already.push(dec.code); continue; }
+
+    /* The report's own wording wins. Where it gave none we fall back to
+       the SAE J2012 generic definition and say which it is, because a
+       generic gloss on a manufacturer-specific code (P1xxx, most B and
+       C codes) is a confident wrong answer. */
+    const fromReport = !!c.description;
+    saved.push(insert('dtcs', {
+      vehicle_id: v.id,
+      session_id: session.id,
+      code: dec.code,
+      description: c.description || dec.description || null,
+      status: c.status || 'stored',
+      source: fromReport ? 'imported' : 'generic_decode'
+    }));
+  }
+
+  audit(req.user.id, v.id, 'import.report', {
+    tool: parsed.tool, format: parsed.format,
+    found: parsed.codes.length, added: saved.length, duplicate: already.length
+  });
+
+  return {
+    session,
+    tool: parsed.tool,
+    format: parsed.format,
+    context: ctx,
+    found: parsed.codes.length,
+    added: saved.length,
+    duplicates: already,
+    dtcs: saved.map(d => ({ ...d, decoded: core.decodeDTC(d.code) }))
+  };
+}
+
+/* pasted text, or text pulled out of an email */
+api.post('/vehicles/:id/import-report', requireAuth, wrap(async (req, res) => {
+  const v = assertVehicle(req.user.id, +req.params.id, true);
+  const text = String(req.body?.text || '');
+  if (!text.trim()) throw httpErr(400, 'Paste the report text, or upload the file your scan tool exported.');
+
+  const parsed = parseScanReport(text, '');
+  if (parsed.error) throw httpErr(422, parsed.error);
+  res.status(201).json(ingestCodes(req, v, parsed, req.body?.source || 'Pasted report'));
+}));
+
+/* an exported file: PDF, CSV, TSV, JSON, XML, HTML or plain text */
+api.post('/vehicles/:id/import-file', requireAuth, upload.single('file'), wrap(async (req, res) => {
+  const v = assertVehicle(req.user.id, +req.params.id, true);
+  if (!req.file) throw httpErr(400, 'No file was uploaded.');
+
+  let buf;
+  try { buf = fs.readFileSync(req.file.path); }
+  finally { try { fs.unlinkSync(req.file.path); } catch { } }   // parse and discard; we do not keep the file
+
+  const parsed = parseScanReport(buf, req.file.originalname || '');
+  if (parsed.error) throw httpErr(422, parsed.error);
+  res.status(201).json(ingestCodes(req, v, parsed, req.file.originalname || 'Imported file'));
+}));
+
+/* typed by hand — the path that always works, on any phone */
+api.post('/vehicles/:id/codes', requireAuth, wrap(async (req, res) => {
+  const v = assertVehicle(req.user.id, +req.params.id, true);
+  const raw = Array.isArray(req.body?.codes) ? req.body.codes : [];
+  const codes = [];
+  for (const item of raw) {
+    const code = String(item?.code || item || '').trim().toUpperCase();
+    if (!/^[PCBU][0-3][0-9A-F]{3}$/.test(code)) continue;
+    codes.push({
+      code,
+      description: item && typeof item === 'object' && item.description ? String(item.description).slice(0, 220) : null,
+      status: ['stored', 'pending', 'permanent', 'history'].includes(item?.status) ? item.status : 'stored'
+    });
+  }
+  if (!codes.length) throw httpErr(400, 'No valid codes. A code is a letter P, C, B or U, then four characters — for example P0420.');
+
+  const parsed = { codes, context: { odometer: req.body?.odometer ?? null }, tool: req.body?.tool || null, format: 'manual' };
+  res.status(201).json(ingestCodes(req, v, parsed, req.body?.tool || 'Typed in by hand'));
+}));
+
+/* decode without saving — powers the live preview as you type */
+api.get('/decode/:code', requireAuth, wrap(async (req, res) => {
+  const code = String(req.params.code || '').trim().toUpperCase();
+  if (!/^[PCBU][0-3][0-9A-F]{3}$/.test(code)) throw httpErr(400, 'Not a valid code format.');
+  res.json(core.decodeDTC(code));
+}));
+
+/* ============================================================
+   FILE UPLOADS — documents and attachments
+   ============================================================ */
 
 api.post('/vehicles/:id/documents/upload', requireAuth, upload.single('file'), wrap(async (req, res) => {
   const v = assertVehicle(req.user.id, +req.params.id, true);
